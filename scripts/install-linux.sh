@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_PIP_DEPS=false
+VENV_PATH=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+for arg in "$@"; do
+  case "$arg" in
+    --with-pip-deps)
+      INSTALL_PIP_DEPS=true
+      ;;
+    --venv-path=*)
+      VENV_PATH="${arg#*=}"
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--with-pip-deps]"
+      echo "  --with-pip-deps      Install optional pip packages (rich, mutagen) into a venv"
+      echo "  --venv-path=/path    Override venv location (default: /home/<user>/.ytdlp-wrapper-venv)"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "Please run as root (sudo)." >&2
+  exit 1
+fi
+
+if ! command -v apt-get >/dev/null 2>&1; then
+  echo "This installer currently supports Debian/Ubuntu (apt-get required)." >&2
+  exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -y
+apt-get install -y --no-install-recommends python3 python3-venv ffmpeg
+
+if ! command -v yt-dlp >/dev/null 2>&1; then
+  apt-get install -y --no-install-recommends yt-dlp
+fi
+
+LOG_DIR="/media/music/.logs"
+mkdir -p "$LOG_DIR"
+chmod 775 "$LOG_DIR"
+if [[ -n "${SUDO_USER:-}" ]]; then
+  chown -R "$SUDO_USER":"$SUDO_USER" "$LOG_DIR"
+fi
+
+if $INSTALL_PIP_DEPS; then
+  if [[ -z "$VENV_PATH" ]]; then
+    if [[ -n "${SUDO_USER:-}" ]]; then
+      VENV_PATH="/home/${SUDO_USER}/.ytdlp-wrapper-venv"
+    else
+      VENV_PATH="$PWD/.venv"
+    fi
+  fi
+
+  echo "Creating venv at: $VENV_PATH"
+  python3 -m venv "$VENV_PATH"
+  "$VENV_PATH/bin/python" -m pip install --upgrade pip
+  "$VENV_PATH/bin/python" -m pip install rich mutagen
+
+  echo "Installing CLI into venv from: $REPO_ROOT"
+  "$VENV_PATH/bin/python" -m pip install -e "$REPO_ROOT"
+
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    chown -R "$SUDO_USER":"$SUDO_USER" "$VENV_PATH"
+  fi
+
+  echo "Optional deps + CLI installed in venv: $VENV_PATH"
+  echo "Installing launcher at /usr/local/bin/ytdlp-wrapper"
+
+  cat > /usr/local/bin/ytdlp-wrapper <<'EOF'
+#!/usr/bin/env bash
+exec "__VENV_BIN__" "$@"
+EOF
+  sed -i "s|__VENV_BIN__|$VENV_PATH/bin/ytdlp-wrapper|g" /usr/local/bin/ytdlp-wrapper
+  chmod 755 /usr/local/bin/ytdlp-wrapper
+fi
+
+if ! command -v ytdlp-wrapper >/dev/null 2>&1; then
+  echo "Install the CLI by running from repo: pip install -e ." >&2
+fi
+
+echo "Installation complete."

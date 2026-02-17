@@ -1,0 +1,23 @@
+[project]
+name = "ytdlp-wrapper"
+version = "0.1.0"
+description = "YouTube Music downloader CLI wrapper around yt-dlp"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "yt-dlp",
+]
+
+[project.optional-dependencies]
+ui = ["rich"]
+metadata = ["mutagen"]
+
+[project.scripts]
+ytdlp-wrapper = "ytdlp_wrapper.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

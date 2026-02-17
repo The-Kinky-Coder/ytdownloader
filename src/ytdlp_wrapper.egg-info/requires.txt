@@ -1,0 +1,7 @@
+yt-dlp
+
+[metadata]
+mutagen
+
+[ui]
+rich
