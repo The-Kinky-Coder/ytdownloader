@@ -846,17 +846,12 @@ def download_job(
                 apply_compilation_tags(downloaded_file, job.meta, logger)
             progress.complete(job.key)
             return
-        logger.error("Download failed for %s: exit %s", job.output_stem, returncode)
-        if last_lines:
-            append_log_line(
-                config,
-                "errors.log",
-                f"{job.output_stem} | last output: {' | '.join(last_lines)}",
-            )
+        reason = _extract_failure_reason(last_lines, returncode)
+        logger.error("Download failed for %s: %s", job.output_stem, reason)
         append_log_line(
             config,
             "errors.log",
-            f"{job.output_stem} | exit {returncode} | {source_url}",
+            f"{job.output_stem} | exit {returncode} | {reason} | {source_url}",
         )
     append_log_line(
         config,
