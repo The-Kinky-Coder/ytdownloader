@@ -794,6 +794,11 @@ def download_job(
             "skipped.log",
             f"{job.output_stem} | {existing} | {source_url}",
         )
+        # Still apply compilation tags on skipped files so that files downloaded
+        # before compilation tagging was introduced are silently self-healed on
+        # the next normal download run, without requiring --retag-all.
+        if job.meta.compilation or job.meta.album_artist:
+            apply_compilation_tags(existing, job.meta, logger)
         progress.advance_overall()
         return
 
@@ -1232,7 +1237,9 @@ def _reprocess_playlist(
             swap_count,
         )
 
-    # Re-apply compilation/Navidrome tags after the swap.
+    # Re-apply compilation/Navidrome tags after the swap as a safety net —
+    # belt-and-suspenders in case any file was moved before its tags were written.
+    # Always run this if anything was swapped, not just when all succeeded.
     if swap_count:
         logger.info("Re-applying compilation tags for %s...", playlist_dir.name)
         retag_playlist_dir(playlist_dir, config, logger)
@@ -1383,6 +1390,12 @@ def _reprocess_download_job(
                 progress.update(job.key, completed=pct)
         process.wait()
         if process.returncode == 0:
+            # Apply ALBUMARTIST/COMPILATION tags immediately while the file is
+            # still in the temp dir. Without this, yt-dlp's embedded per-track
+            # artist tags are what Navidrome reads, causing ghost albums.
+            downloaded = find_existing_file(job.output_dir, job.output_stem)
+            if downloaded and (job.meta.compilation or job.meta.album_artist):
+                apply_compilation_tags(downloaded, job.meta, logger)
             progress.complete(job.key)
             return
         # Extract the most informative line from yt-dlp output for the error
