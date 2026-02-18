@@ -91,6 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Rewrite all playlist M3U files under the base directory",
     )
+    parser.add_argument(
+        "--retag",
+        metavar="DIRECTORY",
+        help="Retroactively fix Navidrome compilation tags on all audio files in DIRECTORY.",
+    )
+    parser.add_argument(
+        "--retag-all",
+        action="store_true",
+        help="Like --retag but runs on every subdirectory of the base directory.",
+    )
     return parser
 
 
@@ -115,26 +125,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     url = args.url_flag or args.url
-    if args.rewrite_m3u or args.rewrite_m3u_all:
+    _offline_mode = (
+        args.rewrite_m3u
+        or args.rewrite_m3u_all
+        or getattr(args, "retag", None)
+        or getattr(args, "retag_all", False)
+    )
+    if _offline_mode:
         url = ""
     if not url and args.purge_metadata_cache:
         url = ""
-    if (
-        not url
-        and not args.purge_metadata_cache
-        and not args.rewrite_m3u
-        and not args.rewrite_m3u_all
-    ):
+    if not url and not args.purge_metadata_cache and not _offline_mode:
         try:
             url = input("Paste YouTube Music URL: ").strip()
         except EOFError:
             url = ""
-    if (
-        not url
-        and not args.purge_metadata_cache
-        and not args.rewrite_m3u
-        and not args.rewrite_m3u_all
-    ):
+    if not url and not args.purge_metadata_cache and not _offline_mode:
         parser.error("url is required")
 
     config = Config().with_overrides(
@@ -177,6 +183,17 @@ def main(argv: list[str] | None = None) -> int:
             from .downloader import rewrite_all_m3u
 
             rewrite_all_m3u(config, logger)
+            return 0
+        if getattr(args, "retag", None):
+            from .downloader import retag_playlist_dir
+
+            updated = retag_playlist_dir(Path(args.retag).expanduser(), config, logger)
+            logger.info("Done. %s file(s) retagged.", updated)
+            return 0
+        if getattr(args, "retag_all", False):
+            from .downloader import retag_all_playlist_dirs
+
+            retag_all_playlist_dirs(config, logger)
             return 0
         download_url(config, url, logger)
     except DownloadError as exc:

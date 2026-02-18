@@ -13,5 +13,6 @@ src/ytdlp_wrapper.egg-info/dependency_links.txt
 src/ytdlp_wrapper.egg-info/entry_points.txt
 src/ytdlp_wrapper.egg-info/requires.txt
 src/ytdlp_wrapper.egg-info/top_level.txt
+tests/test_m3u.py
 tests/test_metadata_cache.py
 tests/test_utils.py

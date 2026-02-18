@@ -31,6 +31,8 @@ class TrackMeta:
     title: str
     artist: str
     album: str | None
+    album_artist: str | None
+    compilation: bool
     track_number: int | None
     playlist_index: int | None
     webpage_url: str
@@ -198,18 +200,37 @@ def extract_album(info: dict) -> str | None:
     return None
 
 
-def build_track_meta(info: dict, playlist_index: int | None) -> TrackMeta:
+def build_track_meta(
+    info: dict,
+    playlist_index: int | None,
+    *,
+    playlist_title: str | None = None,
+    is_compilation: bool = False,
+) -> TrackMeta:
+    """Build a :class:`TrackMeta` from a yt-dlp info dict.
+
+    For playlist downloads pass *playlist_title* (the sanitised folder name) so
+    every track shares the same ``album`` value, and set *is_compilation=True*
+    so that ``ALBUMARTIST`` and ``COMPILATION`` tags are applied via mutagen
+    after the download.  Navidrome requires both of those tags to group tracks
+    from a various-artists playlist into a single album entry.
+    """
     title = info.get("track") or info.get("title") or "Unknown Title"
     artist = extract_artist(info)
-    album = extract_album(info) or info.get("playlist")
+    # For playlists the folder/playlist name is always used as the album so
+    # that every track ends up under the same album in Navidrome.
+    album = playlist_title or extract_album(info) or info.get("playlist")
     if not artist:
         parsed_artist, parsed_title = parse_artist_title(info.get("title") or "")
         artist = parsed_artist or "Unknown Artist"
         title = parsed_title
+    album_artist = "Various Artists" if is_compilation else str(artist)
     return TrackMeta(
         title=str(title),
         artist=str(artist),
         album=str(album) if album else None,
+        album_artist=album_artist,
+        compilation=is_compilation,
         track_number=safe_int(info.get("track_number")) or None,
         playlist_index=playlist_index,
         webpage_url=str(info.get("webpage_url") or info.get("original_url") or ""),
@@ -284,6 +305,204 @@ def _tag_value(value: object) -> str:
     if isinstance(value, (list, tuple)):
         return "; ".join(str(item) for item in value)
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Mutagen-based tag writing for Navidrome compilation support
+# ---------------------------------------------------------------------------
+
+
+def _write_compilation_tags_mutagen(
+    file_path: Path,
+    album: str,
+    album_artist: str,
+    compilation: bool,
+    track_number: int | None,
+    logger: logging.Logger,
+) -> bool:
+    """Write ALBUMARTIST, ALBUM, COMPILATION (and optionally TRACKNUMBER) tags.
+
+    Returns True on success.  Returns False if mutagen is unavailable or the
+    write fails (e.g. unsupported/corrupt file).
+
+    Tag format mapping
+    ------------------
+    - Ogg Opus / Ogg Vorbis / FLAC  → Vorbis comments
+      ALBUMARTIST, ALBUM, COMPILATION=1, TRACKNUMBER
+    - MP3 → ID3v2
+      TPE2 (Album Artist), TALB (Album), TCMP=1, TRCK
+    - M4A/MP4 → MP4 atoms
+      aART (Album Artist), ©alb (Album), cpil=True, trkn
+    """
+    try:
+        from mutagen import File as MutagenFile  # type: ignore
+    except ImportError:
+        logger.warning(
+            "mutagen not installed; skipping tag write for %s", file_path.name
+        )
+        return False
+
+    try:
+        audio = MutagenFile(file_path, easy=False)
+        if audio is None:
+            logger.warning("mutagen could not open %s", file_path.name)
+            return False
+
+        ext = file_path.suffix.lower()
+
+        # ── Vorbis comments (Ogg Opus, Ogg Vorbis, FLAC) ───────────────────
+        if ext in (".opus", ".ogg", ".flac"):
+            tags = audio.tags
+            if tags is None:
+                audio.add_tags()
+                tags = audio.tags
+            tags["ALBUMARTIST"] = [album_artist]
+            tags["ALBUM"] = [album]
+            tags["COMPILATION"] = ["1" if compilation else "0"]
+            if track_number is not None:
+                tags["TRACKNUMBER"] = [str(track_number)]
+            audio.save()
+            return True
+
+        # ── ID3 (MP3) ────────────────────────────────────────────────────────
+        if ext == ".mp3":
+            from mutagen.id3 import ID3, TALB, TCMP, TPE2, TRCK  # type: ignore
+
+            try:
+                id3 = ID3(file_path)
+            except Exception:
+                id3 = ID3()
+            id3["TPE2"] = TPE2(encoding=3, text=[album_artist])
+            id3["TALB"] = TALB(encoding=3, text=[album])
+            id3["TCMP"] = TCMP(encoding=3, text=["1" if compilation else "0"])
+            if track_number is not None:
+                id3["TRCK"] = TRCK(encoding=3, text=[str(track_number)])
+            id3.save(file_path)
+            return True
+
+        # ── MP4 / M4A / AAC ─────────────────────────────────────────────────
+        if ext in (".m4a", ".mp4", ".aac"):
+            from mutagen.mp4 import MP4  # type: ignore
+
+            mp4 = MP4(file_path)
+            if mp4.tags is None:
+                mp4.add_tags()
+            mp4.tags["aART"] = [album_artist]
+            mp4.tags["\xa9alb"] = [album]
+            mp4.tags["cpil"] = compilation
+            if track_number is not None:
+                mp4.tags["trkn"] = [(track_number, 0)]
+            mp4.save()
+            return True
+
+        # ── Generic fallback via easy tags ───────────────────────────────────
+        audio_easy = MutagenFile(file_path, easy=True)
+        if audio_easy is not None:
+            if audio_easy.tags is None:
+                audio_easy.add_tags()
+            audio_easy.tags["albumartist"] = [album_artist]
+            audio_easy.tags["album"] = [album]
+            audio_easy.save()
+            return True
+
+        logger.warning(
+            "Unsupported tag format for %s; skipping tag write", file_path.name
+        )
+        return False
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write tags for %s: %s", file_path.name, exc)
+        return False
+
+
+def apply_compilation_tags(
+    file_path: Path,
+    meta: TrackMeta,
+    logger: logging.Logger,
+) -> bool:
+    """Write ALBUMARTIST / ALBUM / COMPILATION tags to *file_path* using mutagen.
+
+    Called after a successful download to ensure Navidrome groups the track
+    correctly as part of its playlist-album rather than creating one "album"
+    per individual track artist.
+    """
+    if not meta.album or not meta.album_artist:
+        return False
+    return _write_compilation_tags_mutagen(
+        file_path=file_path,
+        album=meta.album,
+        album_artist=meta.album_artist,
+        compilation=meta.compilation,
+        track_number=meta.track_number or meta.playlist_index,
+        logger=logger,
+    )
+
+
+def retag_playlist_dir(
+    playlist_dir: Path,
+    config: Config,
+    logger: logging.Logger,
+    album_artist: str = "Various Artists",
+    compilation: bool = True,
+) -> int:
+    """Retroactively fix Navidrome compilation tags on an existing playlist folder.
+
+    Sets ALBUM to the folder name, ALBUMARTIST to *album_artist* (default
+    ``"Various Artists"``), and COMPILATION=1 on every audio file in
+    *playlist_dir*.  Returns the number of files successfully retagged.
+
+    This is used to fix libraries downloaded before compilation tagging was
+    implemented.  Run with ``--retag <directory>`` or ``--retag-all``.
+    """
+    if not playlist_dir.exists() or not playlist_dir.is_dir():
+        raise DownloadError(f"Playlist directory not found: {playlist_dir}")
+
+    album_name = playlist_dir.name
+    files = [
+        p
+        for p in playlist_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in _AUDIO_EXTS
+    ]
+    files.sort(key=_track_sort_key)
+
+    updated = 0
+    for i, file_path in enumerate(files, start=1):
+        track_match = _TRACK_PREFIX_RE.match(file_path.name)
+        track_number = int(track_match.group(1)) if track_match else i
+        ok = _write_compilation_tags_mutagen(
+            file_path=file_path,
+            album=album_name,
+            album_artist=album_artist,
+            compilation=compilation,
+            track_number=track_number,
+            logger=logger,
+        )
+        if ok:
+            logger.info("Retagged: %s", file_path.name)
+            updated += 1
+        else:
+            logger.warning("Could not retag: %s", file_path.name)
+
+    logger.info("Retagged %s/%s files in '%s'", updated, len(files), playlist_dir.name)
+    return updated
+
+
+def retag_all_playlist_dirs(config: Config, logger: logging.Logger) -> None:
+    """Run :func:`retag_playlist_dir` on every subdirectory of *config.base_dir*."""
+    if not config.base_dir.exists():
+        raise DownloadError(f"Base directory not found: {config.base_dir}")
+    folders = [
+        p
+        for p in config.base_dir.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+    ]
+    if not folders:
+        logger.info("No playlist folders found under %s", config.base_dir)
+        return
+    total_updated = 0
+    for folder in folders:
+        total_updated += retag_playlist_dir(folder, config, logger)
+    logger.info("Total files retagged: %s", total_updated)
 
 
 def build_playlist_jobs(
@@ -370,7 +589,12 @@ def build_playlist_jobs(
         if config.sleep_requests > 0:
             time.sleep(config.sleep_requests)
         playlist_index = safe_int(entry.get("playlist_index"), default=index)
-        meta = build_track_meta(meta_info, playlist_index)
+        meta = build_track_meta(
+            meta_info,
+            playlist_index,
+            playlist_title=playlist_title,
+            is_compilation=True,
+        )
         if meta.title.lower() in {"index", "videoplayback"}:
             logger.warning("Skipping entry with invalid title: %s", entry_url)
             append_log_line(
@@ -402,7 +626,7 @@ def build_playlist_jobs(
 
 
 def build_single_job(config: Config, info: dict) -> DownloadJob:
-    meta = build_track_meta(info, playlist_index=None)
+    meta = build_track_meta(info, playlist_index=None, is_compilation=False)
     artist_dir = sanitize(meta.artist)
     album_dir = sanitize(meta.album or "Unknown Album")
     output_dir = config.base_dir / artist_dir / album_dir
@@ -506,6 +730,12 @@ def download_job(
                 "success.log",
                 f"{job.output_stem} | {job.output_dir} | {source_url}",
             )
+            # Write ALBUMARTIST / ALBUM / COMPILATION tags so Navidrome groups
+            # all tracks in a playlist into one album rather than splitting them
+            # per individual track artist.
+            downloaded_file = find_existing_file(job.output_dir, job.output_stem)
+            if downloaded_file and (job.meta.compilation or job.meta.album_artist):
+                apply_compilation_tags(downloaded_file, job.meta, logger)
             progress.complete(job.key)
             return
         logger.error("Download failed for %s: exit %s", job.output_stem, returncode)
@@ -583,9 +813,9 @@ def write_playlist_m3u(
         extinf = f"#EXTINF:-1,{job.meta.artist} - {job.meta.title}"
         try:
             relative = file_path.relative_to(config.base_dir)
-            entry = str(relative)
+            entry = relative.as_posix()
         except ValueError:
-            entry = str(file_path)
+            entry = file_path.as_posix()
         lines.append(extinf)
         lines.append(entry)
     m3u_path.parent.mkdir(parents=True, exist_ok=True)
@@ -613,9 +843,9 @@ def rewrite_m3u_from_dir(
         extinf = f"#EXTINF:-1,{artist} - {title}"
         try:
             relative = path.relative_to(config.base_dir)
-            entry = str(relative)
+            entry = relative.as_posix()
         except ValueError:
-            entry = str(path)
+            entry = path.as_posix()
         lines.append(extinf)
         lines.append(entry)
     m3u_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

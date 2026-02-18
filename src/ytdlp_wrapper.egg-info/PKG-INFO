@@ -58,7 +58,42 @@ When downloading playlists, the tool writes an M3U file named after the playlist
 inside the playlist folder so Navidrome can auto-detect it on the next library scan.
 The M3U includes `#EXTM3U` and `#EXTINF` entries and avoids duplicates on reruns.
 
+You can rebuild playlist files from existing downloads (no network):
+
+```bash
+ytdlp-wrapper --rewrite-m3u "/media/music/Brother Ali Mix"
+ytdlp-wrapper --rewrite-m3u-all
+```
+
 If you hit YouTube rate limits, try lowering concurrency and increasing request
 sleep values (see `docs/usage.md`).
 
 See full docs in `docs/`.
+
+## Troubleshooting
+
+**Playlist imports missing tracks in Navidrome**
+
+Regenerate the M3U using existing files:
+
+```bash
+ytdlp-wrapper --rewrite-m3u "/media/music/Your Playlist"
+# or rebuild all playlists
+ytdlp-wrapper --rewrite-m3u-all
+```
+
+**YouTube rate limiting**
+
+Lower concurrency and increase sleep values:
+
+```bash
+ytdlp-wrapper --concurrency 1 --sleep-requests 5 --sleep-interval 5 --max-sleep-interval 10
+```
+
+**Metadata cache issues**
+
+Clear cache and retry:
+
+```bash
+ytdlp-wrapper --purge-metadata-cache
+```
