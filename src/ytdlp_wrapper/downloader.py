@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import re
@@ -349,7 +350,8 @@ def make_output_stem(meta: TrackMeta, *, track_prefix: str | None = None) -> str
 def find_existing_file(output_dir: Path, output_stem: str) -> Path | None:
     if not output_dir.exists():
         return None
-    matches = list(output_dir.glob(f"{output_stem}.*"))
+    escaped = glob.escape(output_stem)
+    matches = list(output_dir.glob(f"{escaped}.*"))
     return matches[0] if matches else None
 
 
