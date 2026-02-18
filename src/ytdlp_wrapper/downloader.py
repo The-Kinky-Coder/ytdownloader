@@ -877,9 +877,8 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
     )
     playlist_url: str | None = None
     if is_playlist(info):
-        playlist_url = (
-            info.get("webpage_url") or info.get("original_url") or url or None
-        )
+        raw_url = info.get("webpage_url") or info.get("original_url") or url or None
+        playlist_url = clean_playlist_url(raw_url) if raw_url else None
         jobs = build_playlist_jobs(config, info, logger)
     else:
         jobs = [build_single_job(config, info)]
