@@ -365,8 +365,8 @@ def log_metadata_mismatch(
     mismatch_log = config.log_dir / "metadata_mismatch.log"
     detail = actual or {"error": "mutagen not available"}
     line = (
-        f"{file_path} | expected: artist={expected.artist} album={expected.album} "
-        f"title={expected.title} track={expected.track_number} | actual: {detail}\n"
+        f"{file_path} | expected: album={expected.album} albumartist={expected.album_artist} "
+        f"title={expected.title} compilation={int(expected.compilation)} | actual: {detail}\n"
     )
     mismatch_log.parent.mkdir(parents=True, exist_ok=True)
     with mismatch_log.open("a", encoding="utf-8") as handle:
@@ -384,16 +384,22 @@ def compare_metadata(file_path: Path, expected: TrackMeta) -> dict[str, str] | N
         return None
     tags = audio.tags or {}
     actual = {
-        "artist": _tag_value(tags.get("artist") or tags.get("TPE1")),
         "album": _tag_value(tags.get("album") or tags.get("TALB")),
         "title": _tag_value(tags.get("title") or tags.get("TIT2")),
-        "track": _tag_value(tags.get("tracknumber") or tags.get("TRCK")),
+        "albumartist": _tag_value(
+            tags.get("albumartist") or tags.get("album_artist") or tags.get("TPE2")
+        ),
+        "compilation": _tag_value(tags.get("compilation")),
     }
+    # Only check tags that are critical for Navidrome grouping.
+    # artist is intentionally excluded — flat playlist entries use channel names
+    # (e.g. "ReelBigFishVIDEOS", "Catch 22 - Topic") which differ from the
+    # actual artist tag yt-dlp embeds, causing unavoidable false positives.
     normalized = {
-        "artist": expected.artist,
         "album": expected.album or "",
         "title": expected.title,
-        "track": str(expected.track_number or ""),
+        "albumartist": expected.album_artist or "",
+        "compilation": "1" if expected.compilation else "",
     }
 
     def _loose_match(expected_val: str, actual_val: str) -> bool:
