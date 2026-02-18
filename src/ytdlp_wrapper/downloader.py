@@ -649,6 +649,8 @@ def build_playlist_jobs(
         if meta_info is None:
             meta_info = cache.read(str(entry_url), logger)
             if meta_info is None:
+                if config.sleep_requests > 0:
+                    time.sleep(config.sleep_requests)
                 try:
                     meta_info = run_yt_dlp_json(
                         config,
@@ -693,8 +695,6 @@ def build_playlist_jobs(
                 f"metadata unavailable | {entry_url} | {availability}",
             )
             continue
-        if config.sleep_requests > 0:
-            time.sleep(config.sleep_requests)
         playlist_index = safe_int(entry.get("playlist_index"), default=index)
         meta = build_track_meta(
             meta_info,
