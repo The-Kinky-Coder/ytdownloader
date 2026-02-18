@@ -395,8 +395,19 @@ def compare_metadata(file_path: Path, expected: TrackMeta) -> dict[str, str] | N
         "title": expected.title,
         "track": str(expected.track_number or ""),
     }
+
+    def _loose_match(expected_val: str, actual_val: str) -> bool:
+        """Case-insensitive, whitespace-collapsed substring match."""
+
+        def _norm(s: str) -> str:
+            return "".join(s.lower().split())
+
+        return _norm(expected_val) in _norm(actual_val)
+
     if all(
-        value in (actual.get(key) or "") for key, value in normalized.items() if value
+        _loose_match(value, actual.get(key) or "")
+        for key, value in normalized.items()
+        if value
     ):
         return None
     return actual
