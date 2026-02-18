@@ -922,11 +922,11 @@ def write_playlist_m3u(
     lines: list[str] = ["#EXTM3U"]
     if playlist_url:
         lines.append(f"{_M3U_PLAYLIST_URL_PREFIX}{playlist_url}")
-    missing = 0
+    missing_stems: list[str] = []
     for job in jobs:
         file_path = job.output_dir / job.output_filename(config)
         if not file_path.exists():
-            missing += 1
+            missing_stems.append(job.output_stem)
             continue
         extinf = f"#EXTINF:-1,{job.meta.artist} - {job.meta.title}"
         try:
@@ -938,8 +938,10 @@ def write_playlist_m3u(
         lines.append(entry)
     m3u_path.parent.mkdir(parents=True, exist_ok=True)
     m3u_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    if missing:
-        logger.warning("Playlist M3U missing %s files", missing)
+    if missing_stems:
+        logger.warning("Playlist M3U missing %d files:", len(missing_stems))
+        for stem in missing_stems:
+            logger.warning("  missing: %s", stem)
 
 
 def read_playlist_url_from_m3u(m3u_path: Path) -> str | None:
