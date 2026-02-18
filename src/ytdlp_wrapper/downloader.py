@@ -645,21 +645,25 @@ def build_playlist_jobs(
             if entry_info.get("title") or entry_info.get("track"):
                 meta_info = entry_info
         if meta_info is None:
-            try:
-                meta_info = run_yt_dlp_json(
-                    config,
-                    str(entry_url),
-                    logger=logger,
-                    extra_args=["--ignore-errors"],
-                )
-            except DownloadError as exc:
-                logger.warning("Skipping unavailable entry: %s", exc)
-                append_log_line(
-                    config,
-                    "errors.log",
-                    f"metadata failed | {entry_url} | {exc}",
-                )
-                continue
+            meta_info = cache.read(str(entry_url), logger)
+            if meta_info is None:
+                try:
+                    meta_info = run_yt_dlp_json(
+                        config,
+                        str(entry_url),
+                        logger=logger,
+                        extra_args=["--ignore-errors"],
+                    )
+                except DownloadError as exc:
+                    logger.warning("Skipping unavailable entry: %s", exc)
+                    append_log_line(
+                        config,
+                        "errors.log",
+                        f"metadata failed | {entry_url} | {exc}",
+                    )
+                    continue
+                if meta_info:
+                    cache.write(str(entry_url), meta_info, logger)
         if not meta_info:
             logger.warning("Skipping entry with no metadata: %s", entry_url)
             append_log_line(
