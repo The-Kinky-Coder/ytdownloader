@@ -7,8 +7,10 @@ import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections import deque
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +26,105 @@ from .utils import parse_artist_title, safe_int, sanitize
 _PROGRESS_RE = re.compile(r"\[download\]\s+(\d+\.\d+|\d+)%")
 _TRACK_PREFIX_RE = re.compile(r"^(\d+)-")
 _AUDIO_EXTS = {".opus", ".m4a", ".mp3", ".flac", ".ogg", ".webm", ".aac"}
+_M3U_PLAYLIST_URL_PREFIX = "#PLAYLIST-URL:"
+
+# Query parameters that carry functional meaning and should be kept.
+# Everything else (si, feature, pp, utm_*, etc.) is tracking noise.
+_KEEP_QUERY_PARAMS = {"list", "v"}
+
+
+def clean_playlist_url(url: str) -> str:
+    """Strip tracking/session query params from a YouTube Music URL.
+
+    Keeps only the params in _KEEP_QUERY_PARAMS (i.e. ``list`` and ``v``).
+    Everything else — ``si``, ``feature``, ``pp``, ``utm_*``, etc. — is dropped.
+
+    >>> clean_playlist_url(
+    ...     "https://music.youtube.com/playlist?list=PLxxx&si=jYFdmA5CdprIdmsH"
+    ... )
+    'https://music.youtube.com/playlist?list=PLxxx'
+    """
+    parsed = urlparse(url)
+    kept = [(k, v) for k, v in parse_qsl(parsed.query) if k in _KEEP_QUERY_PARAMS]
+    clean = parsed._replace(query=urlencode(kept))
+    return urlunparse(clean)
+
+
+_DEFAULT_SPONSORBLOCK_CONTENT = """\
+# SponsorBlock categories to remove during download.
+# One category per line. Lines starting with # are ignored.
+#
+# Available categories:
+#   sponsor        - Paid promotion / advertisements
+#   selfpromo      - Unpaid self-promotion (merch, Patreon, etc.)
+#   interaction    - Requests to like, subscribe, follow, etc.
+#   intro          - Intro animation / title card
+#   outro          - Outro / end-cards
+#   preview        - Preview of content in the video
+#   music_offtopic - Non-music section in a music video (e.g. speech)
+#   poi_highlight  - Highlight point of the video (kept by default, not removed)
+#   filler         - Filler content not relevant to the main topic
+#
+# Leave this file empty (or remove all non-comment lines) to disable SponsorBlock.
+#
+# Reference: https://wiki.sponsor.ajay.app/w/Segment_Categories
+music_offtopic
+sponsor
+selfpromo
+intro
+outro
+"""
+
+_DEFAULT_SPONSORBLOCK_CATEGORIES = (
+    "music_offtopic",
+    "sponsor",
+    "selfpromo",
+    "intro",
+    "outro",
+)
+
+
+def load_sponsorblock_categories(
+    config_path: Path, logger: logging.Logger | None = None
+) -> tuple[str, ...]:
+    """Read the SponsorBlock config file and return a tuple of category strings.
+
+    Lines starting with '#' and blank lines are ignored.
+    If the file does not exist it is created with the default categories so the
+    user has a ready-to-edit file and the warning never appears again.
+    Returns an empty tuple only if the file exists but contains no active lines,
+    which disables SponsorBlock entirely (no --sponsorblock-remove flag is added).
+    """
+    resolved = (
+        config_path.expanduser() if not config_path.is_absolute() else config_path
+    )
+    if not resolved.exists():
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(_DEFAULT_SPONSORBLOCK_CONTENT, encoding="utf-8")
+        if logger:
+            logger.info(
+                "Created default SponsorBlock config at %s — using defaults: %s",
+                resolved,
+                ", ".join(_DEFAULT_SPONSORBLOCK_CATEGORIES),
+            )
+        return _DEFAULT_SPONSORBLOCK_CATEGORIES
+    categories: list[str] = []
+    for raw_line in resolved.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            categories.append(line)
+    if logger:
+        if categories:
+            logger.info(
+                "SponsorBlock enabled — removing categories: %s",
+                ", ".join(categories),
+            )
+        else:
+            logger.info(
+                "SponsorBlock config %s has no active categories — SponsorBlock disabled.",
+                resolved,
+            )
+    return tuple(categories)
 
 
 @dataclass(frozen=True)
@@ -669,6 +770,8 @@ def yt_dlp_args(config: Config, job: DownloadJob) -> list[str]:
     args += ["--retries", str(config.retries)]
     if config.cookies_path.exists():
         args += ["--cookies", str(config.cookies_path)]
+    if config.sponsorblock_categories:
+        args += ["--sponsorblock-remove", ",".join(config.sponsorblock_categories)]
     return args
 
 
@@ -699,7 +802,7 @@ def download_job(
     progress.add_task(job.key, job.output_stem, total=100)
 
     for attempt in range(1, config.retries + 1):
-        logger.info(
+        logger.debug(
             "Downloading %s (attempt %s/%s)", job.output_stem, attempt, config.retries
         )
         if attempt > 1:
@@ -766,7 +869,11 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
         logger=logger,
         extra_args=["--ignore-errors", "--flat-playlist"],
     )
+    playlist_url: str | None = None
     if is_playlist(info):
+        playlist_url = (
+            info.get("webpage_url") or info.get("original_url") or url or None
+        )
         jobs = build_playlist_jobs(config, info, logger)
     else:
         jobs = [build_single_job(config, info)]
@@ -790,13 +897,16 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
                     )
                     download_error = exception
     if jobs and jobs[0].m3u_path:
-        write_playlist_m3u(config, jobs, logger)
+        write_playlist_m3u(config, jobs, logger, playlist_url=playlist_url)
     if download_error is not None:
         raise download_error
 
 
 def write_playlist_m3u(
-    config: Config, jobs: list[DownloadJob], logger: logging.Logger
+    config: Config,
+    jobs: list[DownloadJob],
+    logger: logging.Logger,
+    playlist_url: str | None = None,
 ) -> None:
     if not jobs:
         return
@@ -804,6 +914,8 @@ def write_playlist_m3u(
     if not m3u_path:
         return
     lines: list[str] = ["#EXTM3U"]
+    if playlist_url:
+        lines.append(f"{_M3U_PLAYLIST_URL_PREFIX}{playlist_url}")
     missing = 0
     for job in jobs:
         file_path = job.output_dir / job.output_filename(config)
@@ -824,13 +936,37 @@ def write_playlist_m3u(
         logger.warning("Playlist M3U missing %s files", missing)
 
 
+def read_playlist_url_from_m3u(m3u_path: Path) -> str | None:
+    """Return the #PLAYLIST-URL: value from an M3U file, or None if not present."""
+    if not m3u_path.exists():
+        return None
+    for line in m3u_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_M3U_PLAYLIST_URL_PREFIX):
+            url = stripped[len(_M3U_PLAYLIST_URL_PREFIX) :].strip()
+            return url if url else None
+    return None
+
+
 def rewrite_m3u_from_dir(
-    playlist_dir: Path, config: Config, logger: logging.Logger
+    playlist_dir: Path,
+    config: Config,
+    logger: logging.Logger,
+    playlist_url: str | None = None,
 ) -> None:
     if not playlist_dir.exists() or not playlist_dir.is_dir():
         raise DownloadError(f"Playlist directory not found: {playlist_dir}")
     playlist_name = playlist_dir.name
     m3u_path = playlist_dir / f"{playlist_name}.m3u"
+    # Use the explicitly supplied URL (cleaned of tracking params), falling back to
+    # whatever is already stored in the file.
+    effective_url = (
+        clean_playlist_url(playlist_url)
+        if playlist_url
+        else read_playlist_url_from_m3u(m3u_path)
+    )
+    if playlist_url and effective_url != read_playlist_url_from_m3u(m3u_path):
+        logger.info("Storing playlist URL in M3U: %s", effective_url)
     files = [
         path
         for path in playlist_dir.iterdir()
@@ -838,6 +974,8 @@ def rewrite_m3u_from_dir(
     ]
     files.sort(key=_track_sort_key)
     lines: list[str] = ["#EXTM3U"]
+    if effective_url:
+        lines.append(f"{_M3U_PLAYLIST_URL_PREFIX}{effective_url}")
     for path in files:
         artist, title = _extract_tags(path)
         extinf = f"#EXTINF:-1,{artist} - {title}"
@@ -865,6 +1003,438 @@ def rewrite_all_m3u(config: Config, logger: logging.Logger) -> None:
         return
     for folder in folders:
         rewrite_m3u_from_dir(folder, config, logger)
+
+
+def reprocess_all_playlists(config: Config, logger: logging.Logger) -> None:
+    """Re-download all playlists whose M3U files contain a #PLAYLIST-URL: comment.
+
+    This bypasses --no-overwrites and --download-archive so every track is
+    re-fetched from YouTube (with SponsorBlock trimming applied), downloaded to a
+    temporary directory, and then atomically moved into place only if the download
+    succeeds.  The original file is preserved if the re-download fails.
+
+    After all tracks for a playlist are swapped, compilation tags are reapplied
+    via retag_playlist_dir().
+    """
+    if not config.base_dir.exists():
+        raise DownloadError(f"Base directory not found: {config.base_dir}")
+
+    folders = sorted(
+        path
+        for path in config.base_dir.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+    if not folders:
+        logger.info("No playlist folders found under %s", config.base_dir)
+        return
+
+    # Collect (folder, url) pairs from M3U files.
+    targets: list[tuple[Path, str]] = []
+    for folder in folders:
+        m3u_path = folder / f"{folder.name}.m3u"
+        playlist_url = read_playlist_url_from_m3u(m3u_path)
+        if playlist_url:
+            targets.append((folder, playlist_url))
+        else:
+            logger.warning(
+                "Skipping %s — M3U has no #PLAYLIST-URL: comment. "
+                "Run a normal download first to store the URL.",
+                folder.name,
+            )
+
+    if not targets:
+        logger.info("No playlists with stored URLs found. Nothing to reprocess.")
+        return
+
+    logger.info("Reprocessing %s playlist(s)...", len(targets))
+
+    for playlist_dir, playlist_url in targets:
+        logger.info("Reprocessing playlist: %s (%s)", playlist_dir.name, playlist_url)
+        _reprocess_playlist(config, playlist_dir, playlist_url, logger)
+
+    logger.info("Reprocess complete.")
+
+
+def stamp_missing_playlist_urls(config: Config, logger: logging.Logger) -> None:
+    """Interactively prompt for playlist URLs for any M3U missing a #PLAYLIST-URL: stamp.
+
+    Scans every playlist folder under config.base_dir.  For each one whose M3U
+    file lacks a #PLAYLIST-URL: comment the user is shown the playlist name and
+    asked to paste the URL.  Pressing Enter without typing anything skips that
+    playlist.  Playlists that already have a URL stored are listed but skipped
+    automatically.
+    """
+    if not config.base_dir.exists():
+        raise DownloadError(f"Base directory not found: {config.base_dir}")
+
+    folders = sorted(
+        path
+        for path in config.base_dir.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+    if not folders:
+        logger.info("No playlist folders found under %s", config.base_dir)
+        return
+
+    missing: list[Path] = []
+    already_stamped: list[str] = []
+    for folder in folders:
+        m3u_path = folder / f"{folder.name}.m3u"
+        existing_url = read_playlist_url_from_m3u(m3u_path)
+        if existing_url:
+            already_stamped.append(folder.name)
+        else:
+            missing.append(folder)
+
+    if already_stamped:
+        logger.info(
+            "Already stamped (%s): %s",
+            len(already_stamped),
+            ", ".join(already_stamped),
+        )
+
+    if not missing:
+        logger.info("All playlists already have a URL stamp. Nothing to do.")
+        return
+
+    logger.info(
+        "%s playlist(s) are missing a URL stamp. You will be prompted for each one.",
+        len(missing),
+    )
+    print()
+
+    stamped = 0
+    skipped = 0
+    for folder in missing:
+        m3u_path = folder / f"{folder.name}.m3u"
+        print(f"Playlist: {folder.name}")
+        if not m3u_path.exists():
+            print(f"  (no M3U file found at {m3u_path} — skipping)")
+            skipped += 1
+            print()
+            continue
+        try:
+            raw = input("  Paste URL (or press Enter to skip): ").strip()
+        except EOFError:
+            print("\nEOF — stopping.")
+            break
+        if not raw:
+            print("  Skipped.")
+            skipped += 1
+            print()
+            continue
+        rewrite_m3u_from_dir(
+            folder, config, logger, playlist_url=clean_playlist_url(raw)
+        )
+        print(f"  Stamped: {clean_playlist_url(raw)}")
+        stamped += 1
+        print()
+
+    logger.info("Stamp complete: %s stamped, %s skipped.", stamped, skipped)
+
+
+def _reprocess_playlist(
+    config: Config,
+    playlist_dir: Path,
+    playlist_url: str,
+    logger: logging.Logger,
+) -> None:
+    """Re-download one playlist into a temp dir then atomically swap the files."""
+    logger.info("Fetching metadata for reprocess: %s", playlist_url)
+    # Disable metadata cache for reprocess so we get fresh data.
+    reprocess_config = config.with_overrides(metadata_cache_enabled=False)
+
+    try:
+        info = run_yt_dlp_json(
+            reprocess_config,
+            playlist_url,
+            logger=logger,
+            extra_args=["--ignore-errors", "--flat-playlist"],
+        )
+    except DownloadError as exc:
+        logger.error("Failed to fetch metadata for %s: %s", playlist_url, exc)
+        return
+
+    if not is_playlist(info):
+        logger.warning(
+            "%s did not return a playlist — skipping reprocess.", playlist_url
+        )
+        return
+
+    # Build jobs but redirect output into a temp directory.
+    with tempfile.TemporaryDirectory(
+        prefix=f"ytdl_reprocess_{playlist_dir.name}_", dir=playlist_dir.parent
+    ) as tmp_str:
+        tmp_dir = Path(tmp_str)
+        logger.info("Temporary download directory: %s", tmp_dir)
+
+        # Build jobs pointing at the temp dir instead of the real playlist dir.
+        jobs = _build_reprocess_jobs(reprocess_config, info, tmp_dir, logger)
+        if not jobs:
+            logger.warning("No jobs built for %s — skipping.", playlist_url)
+            return
+
+        # Build a reprocess-specific config variant that skips archive and overwrites.
+        # We point the download archive at a throwaway path inside the temp dir so we
+        # never touch (or pollute) the real archive.
+        throwaway_archive = tmp_dir / "reprocess_archive.txt"
+        dl_config = reprocess_config.with_overrides(
+            download_archive=str(throwaway_archive),
+        )
+
+        logger.info(
+            "Re-downloading %s track(s) for %s...", len(jobs), playlist_dir.name
+        )
+        success_count = 0
+        swap_count = 0
+        with ProgressReporter(total=len(jobs), logger=logger) as progress:
+            with ThreadPoolExecutor(
+                max_workers=dl_config.concurrent_downloads
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        _reprocess_download_job, dl_config, job, logger, progress
+                    ): job
+                    for job in jobs
+                }
+                for future in as_completed(futures):
+                    job = futures[future]
+                    exc = future.exception()
+                    if exc:
+                        logger.error(
+                            "Reprocess download failed for %s: %s", job.output_stem, exc
+                        )
+                    else:
+                        success_count += 1
+
+        # Atomically move successful downloads into the real playlist dir.
+        for job in jobs:
+            tmp_file = tmp_dir / job.output_filename(dl_config)
+            if not tmp_file.exists():
+                logger.warning(
+                    "Temp file missing after reprocess — keeping original: %s",
+                    job.output_stem,
+                )
+                continue
+            dest = playlist_dir / job.output_filename(config)
+            try:
+                shutil.move(str(tmp_file), str(dest))
+                swap_count += 1
+                logger.info("Swapped: %s", dest.name)
+            except OSError as exc:
+                logger.error("Failed to move %s → %s: %s", tmp_file, dest, exc)
+
+        logger.info(
+            "Reprocess %s: %s/%s downloaded, %s swapped into place.",
+            playlist_dir.name,
+            success_count,
+            len(jobs),
+            swap_count,
+        )
+
+    # Re-apply compilation/Navidrome tags after the swap.
+    if swap_count:
+        logger.info("Re-applying compilation tags for %s...", playlist_dir.name)
+        retag_playlist_dir(playlist_dir, config, logger)
+
+    # Rewrite the M3U so it reflects the current state (preserving the URL comment).
+    rewrite_m3u_from_dir(playlist_dir, config, logger)
+
+
+def _build_reprocess_jobs(
+    config: Config, info: dict, tmp_dir: Path, logger: logging.Logger
+) -> list[DownloadJob]:
+    """Build DownloadJobs for a reprocess run, redirecting output to tmp_dir."""
+    entries = [entry for entry in info.get("entries") or [] if entry]
+    if not entries:
+        return []
+    total = len(entries)
+    playlist_title = sanitize(info.get("title") or "playlist")
+    width = max(2, len(str(total)))
+    jobs: list[DownloadJob] = []
+    for index, entry in enumerate(entries, start=1):
+        entry_url = entry.get("url") or entry.get("id")
+        if entry_url and not str(entry_url).startswith("http"):
+            entry_url = f"https://music.youtube.com/watch?v={entry_url}"
+        if not entry_url:
+            continue
+        meta_info: dict | None = None
+        if isinstance(entry, dict):
+            entry_info = dict(entry)
+            if entry_url:
+                entry_info["webpage_url"] = entry_url
+            if info.get("title") and "playlist" not in entry_info:
+                entry_info["playlist"] = info.get("title")
+            if entry_info.get("title") or entry_info.get("track"):
+                meta_info = entry_info
+        if meta_info is None:
+            try:
+                meta_info = run_yt_dlp_json(
+                    config,
+                    str(entry_url),
+                    logger=logger,
+                    extra_args=["--ignore-errors"],
+                )
+            except DownloadError as exc:
+                logger.warning("Skipping unavailable entry during reprocess: %s", exc)
+                continue
+        if not meta_info or not meta_info.get("title"):
+            continue
+        playlist_index = safe_int(entry.get("playlist_index"), default=index)
+        meta = build_track_meta(
+            meta_info,
+            playlist_index,
+            playlist_title=playlist_title,
+            is_compilation=True,
+        )
+        source_url = (
+            meta_info.get("webpage_url") or meta_info.get("original_url") or entry_url
+        )
+        video_id = meta_info.get("id")
+        if video_id:
+            source_url = f"https://music.youtube.com/watch?v={video_id}"
+        track_number = meta.track_number or playlist_index or index
+        prefix = str(track_number).zfill(width)
+        stem = make_output_stem(meta, track_prefix=prefix)
+        jobs.append(
+            DownloadJob(
+                key=f"{prefix}-{sanitize(meta.title)}",
+                output_dir=tmp_dir,
+                output_stem=stem,
+                meta=meta,
+                source_url=str(source_url),
+                m3u_path=None,  # No M3U during reprocess; we rewrite after.
+            )
+        )
+    return jobs
+
+
+def _extract_failure_reason(last_lines: "deque[str]", returncode: int) -> str:
+    """Return a concise failure reason from the last yt-dlp output lines.
+
+    Prefers lines that look like errors (contain 'ERROR', 'error', 'HTTP',
+    '429', 'Sign in', etc.) over generic progress lines.  Falls back to the
+    last non-empty line, and ultimately to just the exit code.
+    """
+    _ERROR_KEYWORDS = (
+        "ERROR",
+        "error:",
+        "WARNING",
+        "429",
+        "HTTP Error",
+        "Sign in",
+        "unavailable",
+        "blocked",
+        "forbidden",
+        "private",
+        "removed",
+    )
+    # Scan in reverse so we favour the most recent relevant line.
+    for line in reversed(list(last_lines)):
+        stripped = line.strip()
+        if stripped and any(kw in stripped for kw in _ERROR_KEYWORDS):
+            return stripped
+    # Fall back to the last non-empty line.
+    for line in reversed(list(last_lines)):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return f"exit code {returncode}"
+
+
+def _reprocess_download_job(
+    config: Config,
+    job: DownloadJob,
+    logger: logging.Logger,
+    progress: ProgressReporter,
+) -> None:
+    """Like download_job() but without --no-overwrites, for reprocess mode."""
+    source_url = job.source_url or job.meta.webpage_url
+    job.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build args without --no-overwrites so existing files are replaced.
+    args = _yt_dlp_args_reprocess(config, job)
+    args.append(source_url)
+    progress.add_task(job.key, job.output_stem, total=100)
+
+    reason = "unknown error"
+    for attempt in range(1, config.retries + 1):
+        logger.debug(
+            "Reprocess downloading %s (attempt %s/%s)",
+            job.output_stem,
+            attempt,
+            config.retries,
+        )
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout
+        last_lines: deque[str] = deque(maxlen=20)
+        for line in process.stdout:
+            line = line.rstrip()
+            last_lines.append(line)
+            match = _PROGRESS_RE.search(line)
+            if match:
+                pct = float(match.group(1))
+                progress.update(job.key, completed=pct)
+        process.wait()
+        if process.returncode == 0:
+            progress.complete(job.key)
+            return
+        # Extract the most informative line from yt-dlp output for the error
+        # message — skip blank lines and prefer lines that look like errors.
+        reason = _extract_failure_reason(last_lines, process.returncode)
+        logger.debug(
+            "Reprocess attempt %s/%s failed for %s: %s",
+            attempt,
+            config.retries,
+            job.output_stem,
+            reason,
+        )
+        if attempt < config.retries:
+            time.sleep(config.sleep_interval)
+
+    progress.advance_overall()
+    raise DownloadError(
+        f"Reprocess download failed after {config.retries} attempt(s): "
+        f"{job.output_stem} — {reason}"
+    )
+
+
+def _yt_dlp_args_reprocess(config: Config, job: DownloadJob) -> list[str]:
+    """Build yt-dlp args for reprocess mode: no --no-overwrites, throwaway archive."""
+    args = [
+        config.yt_dlp_bin,
+        "--newline",
+        "--continue",
+        # NOTE: --no-overwrites intentionally omitted so files are replaced.
+        "--extract-audio",
+        "--audio-format",
+        config.audio_format,
+        "--embed-metadata",
+        "--embed-thumbnail",
+        "--add-metadata",
+        "-f",
+        "bestaudio",
+        "--download-archive",
+        str(config.download_archive),  # Points at the throwaway archive in tmp_dir.
+        "-o",
+        job.output_template,
+    ]
+    if config.rate_limit:
+        args += ["--rate-limit", config.rate_limit]
+    args += ["--sleep-interval", str(config.sleep_interval)]
+    args += ["--max-sleep-interval", str(config.max_sleep_interval)]
+    args += ["--retries", str(config.retries)]
+    if config.cookies_path.exists():
+        args += ["--cookies", str(config.cookies_path)]
+    if config.sponsorblock_categories:
+        args += ["--sponsorblock-remove", ",".join(config.sponsorblock_categories)]
+    return args
 
 
 def _track_sort_key(path: Path) -> tuple[int, str]:

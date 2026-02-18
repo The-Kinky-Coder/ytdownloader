@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -24,6 +24,14 @@ class Config:
     audio_format: str = "opus"
     yt_dlp_bin: str = "yt-dlp"
     ffmpeg_bin: str = "ffmpeg"
+    # Path to the SponsorBlock categories config file.
+    # Resolved at runtime relative to CWD so it works regardless of install location.
+    sponsorblock_config: Path = Path(
+        "~/.config/ytdlp-wrapper/sponsorblock.txt"
+    ).expanduser()
+    # Tuple of SponsorBlock category strings to remove, loaded from sponsorblock_config.
+    # Empty tuple = SponsorBlock disabled (no --sponsorblock-remove flag passed).
+    sponsorblock_categories: tuple[str, ...] = field(default_factory=tuple)
 
     def with_overrides(
         self,
@@ -42,6 +50,8 @@ class Config:
         concurrent_downloads: int | None = None,
         retries: int | None = None,
         audio_format: str | None = None,
+        sponsorblock_config: str | None = None,
+        sponsorblock_categories: tuple[str, ...] | None = None,
     ) -> "Config":
         return Config(
             base_dir=Path(base_dir) if base_dir else self.base_dir,
@@ -80,4 +90,10 @@ class Config:
             else self.audio_format,
             yt_dlp_bin=self.yt_dlp_bin,
             ffmpeg_bin=self.ffmpeg_bin,
+            sponsorblock_config=Path(sponsorblock_config)
+            if sponsorblock_config
+            else self.sponsorblock_config,
+            sponsorblock_categories=sponsorblock_categories
+            if sponsorblock_categories is not None
+            else self.sponsorblock_categories,
         )
