@@ -14,6 +14,7 @@ from .downloader import (
     download_url,
     ensure_dependencies,
     ensure_log_dirs,
+    process_pending_sponsorblock,
 )
 
 
@@ -127,6 +128,18 @@ def build_parser() -> argparse.ArgumentParser:
             "stored. Run this once before --reprocess-playlists."
         ),
     )
+    parser.add_argument(
+        "--retry-sponsorblock",
+        action="store_true",
+        help=(
+            "Scan all downloaded files under the base directory for pending SponsorBlock "
+            "post-processing tasks and retry them. Use this after the SponsorBlock API "
+            "has recovered from an outage. Files are already on disk — nothing is "
+            "re-downloaded unless SponsorBlock segment removal requires it. "
+            "Also picks up any failures recorded in errors.log before the sidecar "
+            "system was introduced."
+        ),
+    )
     return parser
 
 
@@ -163,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         or getattr(args, "retag_all", False)
         or getattr(args, "reprocess_playlists", False)
         or getattr(args, "stamp_missing_urls", False)
+        or getattr(args, "retry_sponsorblock", False)
     )
     if _offline_mode:
         url = ""
@@ -283,6 +297,9 @@ def main(argv: list[str] | None = None) -> int:
             from .downloader import stamp_missing_playlist_urls
 
             stamp_missing_playlist_urls(config, logger)
+            return 0
+        if getattr(args, "retry_sponsorblock", False):
+            process_pending_sponsorblock(config, logger)
             return 0
         download_url(config, url, logger)
     except DownloadError as exc:

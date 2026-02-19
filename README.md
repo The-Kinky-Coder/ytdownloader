@@ -95,6 +95,22 @@ ytdlp-wrapper --reprocess-playlists
 
 Downloads go to a temp directory first and are swapped in only on success, so originals are preserved if anything fails.
 
+### SponsorBlock retries
+
+If the SponsorBlock API is down during a download run (Cloudflare outage, server overload, etc.), tracks are still downloaded normally — the audio is fine, just without sponsor segment removal. The tool writes a small `.pending.json` sidecar file next to each affected track to record what still needs doing.
+
+Once the API has recovered, apply SponsorBlock to all pending tracks in one go:
+
+```bash
+ytdlp-wrapper --retry-sponsorblock
+```
+
+This scans your entire music directory for sidecar files, retries SponsorBlock post-processing for each, and removes the sidecar on success. Tracks that still fail are left with their sidecar in place so you can try again later. The command is safe to run multiple times.
+
+> If you had SponsorBlock failures before this sidecar system was introduced, `--retry-sponsorblock` will also scan `errors.log` and `success.log` to bootstrap sidecars for those historic failures automatically.
+
+See `docs/pending-tasks.md` for more on the sidecar architecture.
+
 ### Tag fixes
 
 If Navidrome is splitting a playlist into per-artist ghost albums, fix the compilation tags:
@@ -105,6 +121,14 @@ ytdlp-wrapper --retag-all
 ```
 
 ## Troubleshooting
+
+**SponsorBlock API errors during download**
+
+Tracks still download correctly — the audio is fine. Sidecar files (`.pending.json`) are written next to each affected track. Once the API recovers:
+
+```bash
+ytdlp-wrapper --retry-sponsorblock
+```
 
 **Playlist missing tracks in Navidrome**
 

@@ -35,6 +35,10 @@ Supported keys:
 
 Common SponsorBlock categories: `sponsor`, `selfpromo`, `interaction`, `intro`, `outro`, `preview`, `filler`, `music_offtopic`.
 
+> **Note:** `sponsorblock_categories` must be configured (non-empty) for `--retry-sponsorblock`
+> to apply segment removal. If SponsorBlock is disabled in config, the retry command will
+> find and list pending sidecars but will not remove any segments.
+
 ## cookies.txt
 
 Place your yt-dlp cookies file at `~/.config/ytdlp-wrapper/cookies.txt`.

@@ -97,3 +97,26 @@ ytdlp-wrapper --rate-limit 0 "https://music.youtube.com/playlist?list=..."
 ```
 
 Use `--rate-limit 0` to disable throttling.
+
+### SponsorBlock retries
+
+When the SponsorBlock API is unreachable during a download, the wrapper:
+
+1. Keeps the audio file (the download itself succeeded).
+2. Retries SponsorBlock automatically once the full playlist finishes.
+3. If the retry also fails, writes a `.pending.json` sidecar next to the audio file recording that SponsorBlock still needs to run.
+
+On a later run, once the API is reachable again, you can replay all pending SponsorBlock jobs without re-downloading anything:
+
+```bash
+ytdlp-wrapper --retry-sponsorblock
+```
+
+This will:
+
+- Bootstrap sidecars from `errors.log` for any pre-sidecar failures (one-time, idempotent).
+- Scan `base_dir` recursively for `*.pending.json` files with a `sponsorblock` task.
+- Re-run SponsorBlock segment removal on each matched audio file.
+- Delete the sidecar once the task succeeds.
+
+`--retry-sponsorblock` does not require a URL and does not download anything.

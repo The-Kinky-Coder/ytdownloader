@@ -20,6 +20,12 @@ from typing import Iterable
 
 from .config import Config
 from .metadata_cache import metadata_cache_from_config
+from .pending import (
+    PENDING_TASK_SPONSORBLOCK,
+    PendingFile,
+    find_pending_sidecars,
+    write_pending,
+)
 from .progress import ProgressReporter
 from .utils import parse_artist_title, safe_int, sanitize
 
@@ -28,6 +34,15 @@ _PROGRESS_RE = re.compile(r"\[download\]\s+(\d+\.\d+|\d+)%")
 _TRACK_PREFIX_RE = re.compile(r"^(\d+)-")
 _AUDIO_EXTS = {".opus", ".m4a", ".mp3", ".flac", ".ogg", ".webm", ".aac"}
 _M3U_PLAYLIST_URL_PREFIX = "#PLAYLIST-URL:"
+
+# Phrase emitted by yt-dlp when the SponsorBlock API is unreachable or returns
+# a server error.  We match on this substring to distinguish a SponsorBlock-
+# only failure (file downloaded fine) from a genuine download failure.
+_SPONSORBLOCK_API_ERROR_PHRASE = "Unable to communicate with SponsorBlock API"
+
+# How many times to retry SponsorBlock post-processing after the main
+# playlist download finishes, before giving up and keeping the un-trimmed file.
+_SPONSORBLOCK_RETRY_ATTEMPTS = 3
 
 # Query parameters that carry functional meaning and should be kept.
 # Everything else (si, feature, pp, utm_*, etc.) is tracking noise.
@@ -853,6 +868,7 @@ def download_job(
     job: DownloadJob,
     logger: logging.Logger,
     progress: ProgressReporter,
+    sponsorblock_retry_queue: "list[DownloadJob] | None" = None,
 ) -> None:
     source_url = job.source_url or job.meta.webpage_url
     job.output_dir.mkdir(parents=True, exist_ok=True)
@@ -919,6 +935,34 @@ def download_job(
                 apply_compilation_tags(downloaded_file, job.meta, logger)
             progress.complete(job.key)
             return
+        # If the only failure was the SponsorBlock API being unreachable, the
+        # audio file was still downloaded correctly — yt-dlp just couldn't trim
+        # sponsor segments.  Treat this as a soft failure: mark the track as
+        # completed and queue it for a SponsorBlock-only retry pass after the
+        # rest of the playlist finishes.
+        if _is_sponsorblock_api_error(last_lines):
+            logger.warning(
+                "SponsorBlock API error for %s — file downloaded, will retry "
+                "SponsorBlock post-processing after playlist completes.",
+                job.output_stem,
+            )
+            downloaded_file = find_existing_file(job.output_dir, job.output_stem)
+            if downloaded_file and (job.meta.compilation or job.meta.album_artist):
+                apply_compilation_tags(downloaded_file, job.meta, logger)
+            # Write a sidecar so the user can re-apply SponsorBlock later via
+            # --retry-sponsorblock even if the in-session retry also fails.
+            if downloaded_file and config.sponsorblock_categories:
+                write_pending(
+                    downloaded_file,
+                    source_url,
+                    job.output_stem,
+                    [PENDING_TASK_SPONSORBLOCK],
+                    logger=logger,
+                )
+            progress.complete(job.key)
+            if sponsorblock_retry_queue is not None and config.sponsorblock_categories:
+                sponsorblock_retry_queue.append(job)
+            return
         reason = _extract_failure_reason(last_lines, returncode)
         logger.error("Download failed for %s: %s", job.output_stem, reason)
         append_log_line(
@@ -952,11 +996,19 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
 
     logger.info("Starting downloads: %s item(s)", len(jobs))
     scrub_archive(config, jobs, logger)
+    sponsorblock_retry_queue: list[DownloadJob] = []
     download_error: BaseException | None = None
     with ProgressReporter(total=len(jobs), logger=logger) as progress:
         with ThreadPoolExecutor(max_workers=config.concurrent_downloads) as executor:
             futures = [
-                executor.submit(download_job, config, job, logger, progress)
+                executor.submit(
+                    download_job,
+                    config,
+                    job,
+                    logger,
+                    progress,
+                    sponsorblock_retry_queue,
+                )
                 for job in jobs
             ]
             for future in as_completed(futures):
@@ -971,6 +1023,40 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
                     download_error = exception
     if jobs and jobs[0].m3u_path:
         write_playlist_m3u(config, jobs, logger, playlist_url=playlist_url)
+
+    # --- SponsorBlock retry pass ---
+    # Tracks whose audio downloaded fine but whose SponsorBlock post-processing
+    # failed due to a transient API error are queued here.  We retry them now
+    # that the main playlist download is complete, giving the API time to recover.
+    if sponsorblock_retry_queue:
+        logger.info(
+            "Retrying SponsorBlock post-processing for %d track(s)…",
+            len(sponsorblock_retry_queue),
+        )
+        sb_failed: list[str] = []
+        for job in sponsorblock_retry_queue:
+            success = _retry_sponsorblock_for_job(config, job, logger)
+            if not success:
+                sb_failed.append(job.output_stem)
+        if sb_failed:
+            logger.warning(
+                "SponsorBlock post-processing failed for %d track(s) after retries. "
+                "Files are kept but sponsor segments were NOT removed: %s",
+                len(sb_failed),
+                ", ".join(sb_failed),
+            )
+            for stem in sb_failed:
+                append_log_line(
+                    config,
+                    "errors.log",
+                    f"{stem} | SponsorBlock API unreachable after retries — segments not removed",
+                )
+        else:
+            logger.info(
+                "SponsorBlock post-processing retry succeeded for all %d track(s).",
+                len(sponsorblock_retry_queue),
+            )
+
     if download_error is not None:
         raise download_error
 
@@ -1012,6 +1098,189 @@ def write_playlist_m3u(
         logger.warning("Playlist M3U missing %d files:", len(missing_stems))
         for stem in missing_stems:
             logger.warning("  missing: %s", stem)
+
+
+def _bootstrap_pending_from_logs(
+    config: Config,
+    logger: logging.Logger,
+) -> int:
+    """One-time migration: scan errors.log for historic SponsorBlock failures.
+
+    For each stem recorded as ``SponsorBlock API unreachable after retries``
+    in errors.log, this attempts to find the corresponding audio file on disk
+    and the source URL from success.log, then writes a sidecar if one doesn't
+    already exist.
+
+    Returns the number of sidecars created.
+    """
+    errors_log = config.log_dir / "errors.log"
+    success_log = config.log_dir / "success.log"
+    if not errors_log.exists():
+        return 0
+
+    # Collect stems that have a persistent SponsorBlock failure recorded.
+    sb_failed_stems: set[str] = set()
+    _SB_MARKER = "SponsorBlock API unreachable after retries"
+    for line in errors_log.read_text(encoding="utf-8").splitlines():
+        # Format: "TIMESTAMP stem | SponsorBlock API unreachable after retries..."
+        if _SB_MARKER not in line:
+            continue
+        # Strip the ISO timestamp prefix (everything up to and including the first space).
+        rest = line.split(" ", 1)[-1]
+        stem = rest.split(" | ")[0].strip()
+        if stem:
+            sb_failed_stems.add(stem)
+
+    if not sb_failed_stems:
+        return 0
+
+    # Build a stem→source_url and stem→output_dir map from success.log.
+    stem_to_url: dict[str, str] = {}
+    stem_to_dir: dict[str, Path] = {}
+    if success_log.exists():
+        for line in success_log.read_text(encoding="utf-8").splitlines():
+            # Format: "TIMESTAMP stem | /abs/output/dir | https://..."
+            rest = line.split(" ", 1)[-1]
+            parts = [p.strip() for p in rest.split(" | ")]
+            if len(parts) >= 3:
+                stem_to_url[parts[0]] = parts[2]
+                stem_to_dir[parts[0]] = Path(parts[1])
+
+    created = 0
+    for stem in sb_failed_stems:
+        output_dir = stem_to_dir.get(stem)
+        source_url = stem_to_url.get(stem, "")
+        if output_dir is None:
+            logger.debug(
+                "Bootstrap: no success.log entry for %s — cannot locate file, skipping.",
+                stem,
+            )
+            continue
+        audio_file = find_existing_file(output_dir, stem)
+        if audio_file is None:
+            logger.debug(
+                "Bootstrap: audio file for %s not found in %s — skipping.",
+                stem,
+                output_dir,
+            )
+            continue
+        from .pending import audio_file_to_sidecar
+
+        if audio_file_to_sidecar(audio_file).exists():
+            logger.debug("Bootstrap: sidecar already exists for %s — skipping.", stem)
+            continue
+        write_pending(
+            audio_file, source_url, stem, [PENDING_TASK_SPONSORBLOCK], logger=logger
+        )
+        logger.info("Bootstrap: created sidecar for %s", stem)
+        created += 1
+
+    return created
+
+
+def process_pending_sponsorblock(config: Config, logger: logging.Logger) -> None:
+    """Retry SponsorBlock post-processing for all files with a pending sidecar.
+
+    This is the entry point for ``--retry-sponsorblock``.  It:
+
+    1. Runs a one-time log bootstrap to create sidecars for any historic
+       errors recorded before the sidecar system was introduced.
+    2. Scans ``base_dir`` recursively for ``*.pending.json`` files that
+       contain the ``sponsorblock`` task.
+    3. For each candidate, verifies the audio file is on disk and a source
+       URL is available, then re-runs yt-dlp with ``--sponsorblock-remove``.
+    4. On success, removes the ``sponsorblock`` task from the sidecar (and
+       deletes the sidecar if it becomes empty).
+    5. On persistent failure, logs a warning and leaves the sidecar in place
+       for the next attempt.
+    """
+    if not config.sponsorblock_categories:
+        logger.warning(
+            "--retry-sponsorblock: SponsorBlock is disabled (no categories configured). "
+            "Set sponsorblock_categories in config.ini first."
+        )
+        return
+
+    # Bootstrap sidecars from historic log entries so that files that failed
+    # before the sidecar system was added are also picked up.
+    bootstrapped = _bootstrap_pending_from_logs(config, logger)
+    if bootstrapped:
+        logger.info(
+            "Bootstrapped %d sidecar(s) from historic errors.log entries.", bootstrapped
+        )
+
+    pending = find_pending_sidecars(
+        config.base_dir, task=PENDING_TASK_SPONSORBLOCK, logger=logger
+    )
+
+    if not pending:
+        logger.info("No pending SponsorBlock tasks found under %s.", config.base_dir)
+        return
+
+    logger.info(
+        "Found %d file(s) with pending SponsorBlock post-processing.", len(pending)
+    )
+
+    succeeded: list[str] = []
+    failed: list[str] = []
+
+    for pf in pending:
+        if not pf.source_url:
+            logger.warning("Skipping %s — sidecar has no source_url.", pf.output_stem)
+            failed.append(pf.output_stem)
+            continue
+        if not pf.audio_file.exists():
+            logger.warning(
+                "Skipping %s — audio file no longer exists at %s.",
+                pf.output_stem,
+                pf.audio_file,
+            )
+            failed.append(pf.output_stem)
+            continue
+
+        logger.info("Retrying SponsorBlock for: %s", pf.output_stem)
+
+        # Build a minimal DownloadJob so we can reuse _retry_sponsorblock_for_job.
+        minimal_meta = TrackMeta(
+            title=pf.output_stem,
+            artist="",
+            album=None,
+            album_artist=None,
+            compilation=False,
+            track_number=None,
+            playlist_index=None,
+            webpage_url=pf.source_url,
+        )
+        job = DownloadJob(
+            key=pf.output_stem,
+            output_dir=pf.audio_file.parent,
+            output_stem=pf.output_stem,
+            meta=minimal_meta,
+            source_url=pf.source_url,
+        )
+
+        success = _retry_sponsorblock_for_job(config, job, logger, pending_file=pf)
+        if success:
+            succeeded.append(pf.output_stem)
+        else:
+            failed.append(pf.output_stem)
+            append_log_line(
+                config,
+                "errors.log",
+                f"{pf.output_stem} | SponsorBlock retry failed — sidecar kept for next attempt",
+            )
+
+    logger.info(
+        "--retry-sponsorblock complete: %d succeeded, %d failed.",
+        len(succeeded),
+        len(failed),
+    )
+    if failed:
+        logger.warning(
+            "SponsorBlock still pending for %d file(s): %s",
+            len(failed),
+            ", ".join(failed),
+        )
 
 
 def read_playlist_url_from_m3u(m3u_path: Path) -> str | None:
@@ -1420,6 +1689,79 @@ def _extract_failure_reason(last_lines: "deque[str]", returncode: int) -> str:
         if stripped:
             return stripped
     return f"exit code {returncode}"
+
+
+def _is_sponsorblock_api_error(last_lines: "deque[str]") -> bool:
+    """Return True if the yt-dlp output indicates a SponsorBlock API failure.
+
+    We look for yt-dlp's standard phrase for SponsorBlock connectivity problems.
+    This distinguishes a transient external-service error (file still downloaded
+    successfully) from a genuine download failure.
+    """
+    return any(_SPONSORBLOCK_API_ERROR_PHRASE in line for line in last_lines)
+
+
+def _retry_sponsorblock_for_job(
+    config: Config,
+    job: DownloadJob,
+    logger: logging.Logger,
+    attempts: int = _SPONSORBLOCK_RETRY_ATTEMPTS,
+    pending_file: "PendingFile | None" = None,
+) -> bool:
+    """Re-run yt-dlp with SponsorBlock post-processing for an already-downloaded file.
+
+    Uses a throwaway download archive so yt-dlp re-downloads and re-processes
+    the file even though it was already recorded in the real archive.
+
+    If *pending_file* is supplied and processing succeeds, the
+    ``sponsorblock`` task is removed from it (and the sidecar deleted if no
+    tasks remain).
+
+    Returns True if SponsorBlock was applied successfully, False otherwise.
+    """
+    source_url = job.source_url or job.meta.webpage_url
+    with tempfile.TemporaryDirectory(
+        prefix=f"ytdl_sb_retry_{job.output_stem[:40]}_"
+    ) as tmp_str:
+        throwaway_archive = Path(tmp_str) / "sb_retry_archive.txt"
+        sb_config = config.with_overrides(download_archive=str(throwaway_archive))
+        args = _yt_dlp_args_reprocess(sb_config, job)
+        args.append(source_url)
+
+        for attempt in range(1, attempts + 1):
+            logger.debug(
+                "SponsorBlock retry %s/%s for %s", attempt, attempts, job.output_stem
+            )
+            if attempt > 1:
+                time.sleep(config.sleep_interval)
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout
+            last_lines: deque[str] = deque(maxlen=20)
+            for line in process.stdout:
+                last_lines.append(line.rstrip())
+            process.wait()
+            if process.returncode == 0:
+                logger.info(
+                    "SponsorBlock applied successfully on retry for %s", job.output_stem
+                )
+                if pending_file is not None:
+                    pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
+                return True
+            reason = _extract_failure_reason(last_lines, process.returncode)
+            logger.debug(
+                "SponsorBlock retry %s/%s failed for %s: %s",
+                attempt,
+                attempts,
+                job.output_stem,
+                reason,
+            )
+    return False
 
 
 def _reprocess_download_job(
