@@ -1773,13 +1773,21 @@ def _retry_sponsorblock_for_job(
                     pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
                 return True
             reason = _extract_failure_reason(last_lines, process.returncode)
-            logger.debug(
-                "SponsorBlock retry %s/%s failed for %s: %s",
-                attempt,
-                attempts,
-                job.output_stem,
-                reason,
-            )
+            if attempt < attempts:
+                logger.debug(
+                    "SponsorBlock retry %s/%s failed for %s: %s",
+                    attempt,
+                    attempts,
+                    job.output_stem,
+                    reason,
+                )
+            else:
+                logger.warning(
+                    "SponsorBlock retry failed for %s after %d attempt(s): %s",
+                    job.output_stem,
+                    attempts,
+                    reason,
+                )
     return False
 
 
