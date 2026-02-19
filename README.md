@@ -1,72 +1,117 @@
 # ytdownloader
 
-YouTube Music downloader CLI wrapper around yt-dlp with progress bars and structured logs.
+YouTube Music downloader CLI — wraps yt-dlp with Navidrome-compatible tagging, SponsorBlock trimming, M3U playlist generation, and a clean progress UI.
 
-## Quick Start
+> **Note:** This tool was built primarily for my own use. The defaults (download location, audio format, Navidrome tagging conventions, etc.) reflect my personal setup. It works well for me but your mileage may vary — feel free to adapt it to your needs.
 
-1. Install dependencies:
+## Requirements
+
+- Debian/Ubuntu Linux (installer uses `apt-get`)
+- Python 3.10+
+- `yt-dlp` and `ffmpeg` (installed by the installer)
+- Optional: `rich`, `mutagen` pip packages (nicer UI and tag rewriting)
+
+## Installation
 
 ```bash
 sudo ./scripts/install-linux.sh
 ```
 
-2. Optional pip extras (installed into a venv):
+The installer will:
+- Install `yt-dlp`, `ffmpeg`, and `python3` via apt
+- Prompt for your music directory (default: `/media/music`)
+- Create `~/.config/ytdlp-wrapper/config.ini` with your settings
+
+To also install the pip extras and register `ytdlp-wrapper` as a system command:
 
 ```bash
 sudo ./scripts/install-linux.sh --with-pip-deps
 ```
 
-This will create a venv, install the CLI into it, and add a launcher at
-`/usr/local/bin/ytdlp-wrapper` so you can run the command without activating
-the venv.
+This creates a venv, installs `rich` and `mutagen`, and adds a launcher at `/usr/local/bin/ytdlp-wrapper`.
 
-3. If you skip pip deps, install the CLI manually (from repo):
+If you skip `--with-pip-deps`, install the CLI manually from the repo root:
 
 ```bash
 pip install -e .
 ```
 
-4. Run the CLI:
+## Configuration
+
+All config lives in one place:
+
+```
+~/.config/ytdlp-wrapper/
+├── config.ini      # music directory, SponsorBlock categories
+└── cookies.txt     # optional — yt-dlp cookies (placed here, used automatically)
+```
+
+Minimal `config.ini`:
+
+```ini
+[ytdlp-wrapper]
+base_dir = /media/music
+
+# Uncomment to enable SponsorBlock trimming:
+# sponsorblock_categories = sponsor,selfpromo,interaction
+```
+
+Logs are written to `<base_dir>/.logs/`.
+
+See `docs/configuration.md` for all supported keys and CLI flag reference.
+
+## Usage
+
+Download a playlist or single track:
 
 ```bash
 ytdlp-wrapper "https://music.youtube.com/playlist?list=..."
+# or use --url to avoid shell quoting issues with & characters:
+ytdlp-wrapper --url https://music.youtube.com/playlist?list=...
 ```
 
-If you prefer not to quote URLs with `&`, use `--url`:
+If no URL is provided you will be prompted for one interactively.
 
-```bash
-ytdlp-wrapper --url https://music.youtube.com/playlist?list=...&si=...
-```
+### M3U playlists
 
-Logging lives under `/media/music/.logs` with per-run logs plus success/skipped/errors/retries files. Rate limiting can be disabled with `--rate-limit 0`. Cookies are optional: pass `--cookies` or rely on the default path if present.
-
-Audio is converted to `opus` by default for Navidrome compatibility. Override with `--audio-format m4a` if needed.
-
-When downloading playlists, the tool writes an M3U file named after the playlist
-inside the playlist folder so Navidrome can auto-detect it on the next library scan.
-The M3U includes `#EXTM3U` and `#EXTINF` entries and avoids duplicates on reruns.
-
-You can rebuild playlist files from existing downloads (no network):
+A `.m3u` file is written alongside each downloaded playlist so Navidrome can detect it automatically. To rebuild M3U files from existing files on disk (no network required):
 
 ```bash
 ytdlp-wrapper --rewrite-m3u "/media/music/Brother Ali Mix"
 ytdlp-wrapper --rewrite-m3u-all
 ```
 
-If you hit YouTube rate limits, try lowering concurrency and increasing request
-sleep values (see `docs/usage.md`).
+### Re-downloading playlists
 
-See full docs in `docs/`.
+To re-download all playlists (with SponsorBlock applied), using stored playlist URLs:
+
+```bash
+# First time: stamp any playlist folders that are missing their stored URL
+ytdlp-wrapper --stamp-missing-urls
+
+# Then re-download all playlists atomically
+ytdlp-wrapper --reprocess-playlists
+```
+
+Downloads go to a temp directory first and are swapped in only on success, so originals are preserved if anything fails.
+
+### Tag fixes
+
+If Navidrome is splitting a playlist into per-artist ghost albums, fix the compilation tags:
+
+```bash
+ytdlp-wrapper --retag "/media/music/Your Playlist"
+ytdlp-wrapper --retag-all
+```
 
 ## Troubleshooting
 
-**Playlist imports missing tracks in Navidrome**
+**Playlist missing tracks in Navidrome**
 
-Regenerate the M3U using existing files:
+Regenerate the M3U from existing files:
 
 ```bash
 ytdlp-wrapper --rewrite-m3u "/media/music/Your Playlist"
-# or rebuild all playlists
 ytdlp-wrapper --rewrite-m3u-all
 ```
 
@@ -78,9 +123,11 @@ Lower concurrency and increase sleep values:
 ytdlp-wrapper --concurrency 1 --sleep-requests 5 --sleep-interval 5 --max-sleep-interval 10
 ```
 
-**Metadata cache issues**
+**Tracks re-downloading that you already have**
 
-Clear cache and retry:
+The download archive at `<base_dir>/.logs/download_archive.txt` tracks what has been downloaded. On each run, entries whose files are missing from disk are automatically scrubbed so yt-dlp re-downloads them naturally.
+
+**Metadata cache issues**
 
 ```bash
 ytdlp-wrapper --purge-metadata-cache
