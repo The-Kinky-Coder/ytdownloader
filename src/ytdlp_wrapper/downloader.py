@@ -942,6 +942,9 @@ def write_playlist_m3u(
     for job in jobs:
         file_path = job.output_dir / job.output_filename(config)
         if not file_path.exists():
+            # Fall back to glob search in case the file exists under a different extension
+            file_path = find_existing_file(job.output_dir, job.output_stem) or file_path
+        if not file_path.exists():
             missing_stems.append(job.output_stem)
             continue
         extinf = f"#EXTINF:-1,{job.meta.artist} - {job.meta.title}"
