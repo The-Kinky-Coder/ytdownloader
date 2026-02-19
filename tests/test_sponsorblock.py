@@ -93,25 +93,34 @@ class TestRetrySponsorblockForJob(unittest.TestCase):
 
     @patch("ytdlp_wrapper.downloader._yt_dlp_args_reprocess")
     @patch("ytdlp_wrapper.downloader.subprocess.Popen")
-    @patch("ytdlp_wrapper.downloader.tempfile.TemporaryDirectory")
-    def test_returns_true_on_immediate_success(
-        self, mock_tmpdir, mock_popen, mock_args
-    ) -> None:
+    def test_returns_true_on_immediate_success(self, mock_popen, mock_args) -> None:
+        import tempfile
         from ytdlp_wrapper.downloader import _retry_sponsorblock_for_job
 
-        mock_tmpdir.return_value.__enter__ = lambda s: "/tmp/fake"
-        mock_tmpdir.return_value.__exit__ = MagicMock(return_value=False)
-        mock_args.return_value = ["yt-dlp", "--sponsorblock-remove", "sponsor"]
+        with tempfile.TemporaryDirectory() as real_tmp:
+            # Place a fake processed audio file where the code will look for it.
+            fake_output = Path(real_tmp) / "001-Artist-Song.opus"
+            fake_output.touch()
 
-        proc = MagicMock()
-        proc.stdout.__iter__ = lambda s: iter(["[download] 100%\n"])
-        proc.wait.return_value = None
-        proc.returncode = 0
-        mock_popen.return_value = proc
+            mock_args.return_value = ["yt-dlp", "--sponsorblock-remove", "sponsor"]
 
-        result = _retry_sponsorblock_for_job(
-            self._make_config(), self._make_job(), MagicMock(), attempts=1
-        )
+            proc = MagicMock()
+            proc.stdout.__iter__ = lambda s: iter(["[download] 100%\n"])
+            proc.wait.return_value = None
+            proc.returncode = 0
+            mock_popen.return_value = proc
+
+            cfg = self._make_config()
+            job = self._make_job()
+            job.output_dir = Path(real_tmp)
+
+            with patch(
+                "ytdlp_wrapper.downloader.tempfile.TemporaryDirectory"
+            ) as mock_tmpdir:
+                mock_tmpdir.return_value.__enter__ = lambda s: real_tmp
+                mock_tmpdir.return_value.__exit__ = MagicMock(return_value=False)
+                result = _retry_sponsorblock_for_job(cfg, job, MagicMock(), attempts=1)
+
         self.assertTrue(result)
 
     @patch("ytdlp_wrapper.downloader._yt_dlp_args_reprocess")
@@ -120,53 +129,62 @@ class TestRetrySponsorblockForJob(unittest.TestCase):
     def test_returns_false_after_all_attempts_fail(
         self, mock_tmpdir, mock_popen, mock_args
     ) -> None:
+        import tempfile
         from ytdlp_wrapper.downloader import _retry_sponsorblock_for_job
 
-        mock_tmpdir.return_value.__enter__ = lambda s: "/tmp/fake"
-        mock_tmpdir.return_value.__exit__ = MagicMock(return_value=False)
-        mock_args.return_value = ["yt-dlp"]
+        with tempfile.TemporaryDirectory() as real_tmp:
+            mock_tmpdir.return_value.__enter__ = lambda s: real_tmp
+            mock_tmpdir.return_value.__exit__ = MagicMock(return_value=False)
+            mock_args.return_value = ["yt-dlp"]
 
-        proc = MagicMock()
-        proc.stdout.__iter__ = lambda s: iter(
-            [f"ERROR: {_SPONSORBLOCK_API_ERROR_PHRASE}: HTTP Error 500\n"]
-        )
-        proc.wait.return_value = None
-        proc.returncode = 1
-        mock_popen.return_value = proc
+            proc = MagicMock()
+            proc.stdout.__iter__ = lambda s: iter(
+                [f"ERROR: {_SPONSORBLOCK_API_ERROR_PHRASE}: HTTP Error 500\n"]
+            )
+            proc.wait.return_value = None
+            proc.returncode = 1
+            mock_popen.return_value = proc
 
-        result = _retry_sponsorblock_for_job(
-            self._make_config(), self._make_job(), MagicMock(), attempts=2
-        )
+            result = _retry_sponsorblock_for_job(
+                self._make_config(), self._make_job(), MagicMock(), attempts=2
+            )
         self.assertFalse(result)
         self.assertEqual(mock_popen.call_count, 2)
 
     @patch("ytdlp_wrapper.downloader._yt_dlp_args_reprocess")
     @patch("ytdlp_wrapper.downloader.subprocess.Popen")
-    @patch("ytdlp_wrapper.downloader.tempfile.TemporaryDirectory")
-    def test_returns_true_on_second_attempt(
-        self, mock_tmpdir, mock_popen, mock_args
-    ) -> None:
+    def test_returns_true_on_second_attempt(self, mock_popen, mock_args) -> None:
+        import tempfile
         from ytdlp_wrapper.downloader import _retry_sponsorblock_for_job
 
-        mock_tmpdir.return_value.__enter__ = lambda s: "/tmp/fake"
-        mock_tmpdir.return_value.__exit__ = MagicMock(return_value=False)
-        mock_args.return_value = ["yt-dlp"]
+        with tempfile.TemporaryDirectory() as real_tmp:
+            fake_output = Path(real_tmp) / "001-Artist-Song.opus"
+            fake_output.touch()
+            mock_args.return_value = ["yt-dlp"]
 
-        fail_proc = MagicMock()
-        fail_proc.stdout.__iter__ = lambda s: iter(["ERROR: SponsorBlock failed\n"])
-        fail_proc.wait.return_value = None
-        fail_proc.returncode = 1
+            fail_proc = MagicMock()
+            fail_proc.stdout.__iter__ = lambda s: iter(["ERROR: SponsorBlock failed\n"])
+            fail_proc.wait.return_value = None
+            fail_proc.returncode = 1
 
-        ok_proc = MagicMock()
-        ok_proc.stdout.__iter__ = lambda s: iter(["[download] 100%\n"])
-        ok_proc.wait.return_value = None
-        ok_proc.returncode = 0
+            ok_proc = MagicMock()
+            ok_proc.stdout.__iter__ = lambda s: iter(["[download] 100%\n"])
+            ok_proc.wait.return_value = None
+            ok_proc.returncode = 0
 
-        mock_popen.side_effect = [fail_proc, ok_proc]
+            mock_popen.side_effect = [fail_proc, ok_proc]
 
-        result = _retry_sponsorblock_for_job(
-            self._make_config(), self._make_job(), MagicMock(), attempts=3
-        )
+            cfg = self._make_config()
+            job = self._make_job()
+            job.output_dir = Path(real_tmp)
+
+            with patch(
+                "ytdlp_wrapper.downloader.tempfile.TemporaryDirectory"
+            ) as mock_tmpdir:
+                mock_tmpdir.return_value.__enter__ = lambda s: real_tmp
+                mock_tmpdir.return_value.__exit__ = MagicMock(return_value=False)
+                result = _retry_sponsorblock_for_job(cfg, job, MagicMock(), attempts=3)
+
         self.assertTrue(result)
         self.assertEqual(mock_popen.call_count, 2)
 

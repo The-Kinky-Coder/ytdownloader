@@ -1168,6 +1168,22 @@ def _bootstrap_pending_from_logs(
     if not stem_to_url:
         return 0
 
+    # Skip stems that were already successfully resolved in a previous retry run.
+    done_log = config.log_dir / "sponsorblock_done.log"
+    resolved_stems: set[str] = set()
+    if done_log.exists():
+        for line in done_log.read_text(encoding="utf-8").splitlines():
+            s = (
+                line.strip().split(" ", 1)[-1].strip()
+            )  # strip optional timestamp prefix
+            if s:
+                resolved_stems.add(s)
+    if resolved_stems:
+        stem_to_url = {s: u for s, u in stem_to_url.items() if s not in resolved_stems}
+
+    if not stem_to_url:
+        return 0
+
     # Supplement missing URLs from success.log when available.
     # success.log format: "TIMESTAMP stem | /abs/output/dir | https://..."
     stem_to_dir: dict[str, Path] = {}
@@ -1306,6 +1322,9 @@ def process_pending_sponsorblock(config: Config, logger: logging.Logger) -> None
         success = _retry_sponsorblock_for_job(config, job, logger, pending_file=pf)
         if success:
             succeeded.append(pf.output_stem)
+            # Record in sponsorblock_done.log so the bootstrap doesn't recreate
+            # the sidecar on subsequent runs.
+            append_log_line(config, "sponsorblock_done.log", pf.output_stem)
         else:
             failed.append(pf.output_stem)
             append_log_line(
@@ -1767,9 +1786,16 @@ def _retry_sponsorblock_for_job(
     with tempfile.TemporaryDirectory(
         prefix=f"ytdl_sb_retry_{job.output_stem[:40]}_"
     ) as tmp_str:
-        throwaway_archive = Path(tmp_str) / "sb_retry_archive.txt"
+        tmp_dir = Path(tmp_str)
+        throwaway_archive = tmp_dir / "sb_retry_archive.txt"
+        # Output to the temp dir, not the real output dir, so yt-dlp's temp
+        # files (.temp.*, .part, etc.) don't clobber our sidecar or the real
+        # audio file mid-run.  On success we atomically move the result over.
+        tmp_output_template = str(tmp_dir / f"{job.output_stem}.%(ext)s")
         sb_config = config.with_overrides(download_archive=str(throwaway_archive))
-        args = _yt_dlp_args_reprocess(sb_config, job)
+        args = _yt_dlp_args_reprocess(
+            sb_config, job, output_template=tmp_output_template
+        )
         args.append(source_url)
 
         for attempt in range(1, attempts + 1):
@@ -1787,16 +1813,55 @@ def _retry_sponsorblock_for_job(
             )
             assert process.stdout
             last_lines: deque[str] = deque(maxlen=50)
+            no_segments = False
             for line in process.stdout:
-                last_lines.append(line.rstrip())
+                stripped = line.rstrip()
+                last_lines.append(stripped)
+                if (
+                    "No matching segments were found in the SponsorBlock database"
+                    in stripped
+                ):
+                    no_segments = True
             process.wait()
-            if process.returncode == 0:
+
+            if no_segments:
+                # SponsorBlock API is reachable but has no segments for this
+                # track — that is not an error.  The file is already clean.
                 logger.info(
-                    "SponsorBlock applied successfully on retry for %s", job.output_stem
+                    "SponsorBlock: no segments found for %s — file is already clean.",
+                    job.output_stem,
                 )
                 if pending_file is not None:
                     pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
                 return True
+
+            if process.returncode == 0:
+                # Move the processed file from tmp to the real output dir.
+                tmp_audio = next(
+                    (
+                        p
+                        for p in tmp_dir.iterdir()
+                        if p.suffix and not p.name.endswith(".txt")
+                    ),
+                    None,
+                )
+                if tmp_audio is not None:
+                    dest = job.output_dir / tmp_audio.name
+                    shutil.move(str(tmp_audio), dest)
+                    logger.info(
+                        "SponsorBlock applied successfully on retry for %s",
+                        job.output_stem,
+                    )
+                else:
+                    logger.warning(
+                        "SponsorBlock retry for %s: yt-dlp exited 0 but no output file found in %s",
+                        job.output_stem,
+                        tmp_dir,
+                    )
+                if pending_file is not None:
+                    pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
+                return True
+
             reason = _extract_failure_reason(last_lines, process.returncode)
             if attempt < attempts:
                 logger.debug(
@@ -1893,13 +1958,24 @@ def _reprocess_download_job(
     )
 
 
-def _yt_dlp_args_reprocess(config: Config, job: DownloadJob) -> list[str]:
+def _yt_dlp_args_reprocess(
+    config: Config,
+    job: DownloadJob,
+    output_template: str | None = None,
+) -> list[str]:
     """Build yt-dlp args for reprocess mode: no --no-overwrites, throwaway archive.
+
+    *output_template* overrides job.output_template when supplied — used by the
+    SponsorBlock retry to redirect output to a temp dir so yt-dlp temp files
+    don't clobber the real audio file or its sidecar.
 
     Intentionally omits --embed-thumbnail / --add-metadata because those require
     AtomicParsley or specific ffmpeg builds and are not needed for SponsorBlock
     segment removal.  The existing embedded tags and thumbnail are preserved as-is.
     """
+    effective_template = (
+        output_template if output_template is not None else job.output_template
+    )
     args = [
         config.yt_dlp_bin,
         "--newline",
@@ -1917,7 +1993,7 @@ def _yt_dlp_args_reprocess(config: Config, job: DownloadJob) -> list[str]:
         "--download-archive",
         str(config.download_archive),  # Points at the throwaway archive in tmp_dir.
         "-o",
-        job.output_template,
+        effective_template,
     ]
     if config.rate_limit:
         args += ["--rate-limit", config.rate_limit]
