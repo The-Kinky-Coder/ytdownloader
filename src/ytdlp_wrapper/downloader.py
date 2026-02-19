@@ -749,6 +749,56 @@ def build_playlist_jobs(
     return jobs
 
 
+def scrub_archive(
+    config: Config, jobs: list[DownloadJob], logger: logging.Logger
+) -> int:
+    """Remove download archive entries whose output files are missing from disk.
+
+    When a file is deleted from disk but its video ID remains in the archive,
+    yt-dlp silently skips it on the next run. This function detects that case
+    and removes those stale entries so yt-dlp will re-download them.
+
+    Returns the number of entries removed.
+    """
+    archive_path = config.download_archive
+    if not archive_path.exists():
+        return 0
+
+    # Build a map of video_id -> job for quick lookup
+    id_to_job: dict[str, DownloadJob] = {}
+    for job in jobs:
+        parsed = urlparse(job.source_url)
+        params = dict(parse_qsl(parsed.query))
+        video_id = params.get("v") or parsed.path.lstrip("/")
+        if video_id:
+            id_to_job[video_id] = job
+
+    lines = archive_path.read_text(encoding="utf-8").splitlines()
+    kept: list[str] = []
+    removed = 0
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) >= 2:
+            video_id = parts[1]
+            job = id_to_job.get(video_id)
+            if job is not None:
+                existing = find_existing_file(job.output_dir, job.output_stem)
+                if existing is None:
+                    logger.warning(
+                        "Archive scrub: removing stale entry %s (%s) — file missing from disk, will re-download",
+                        video_id,
+                        job.output_stem,
+                    )
+                    removed += 1
+                    continue
+        kept.append(line)
+
+    if removed:
+        archive_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        logger.info("Archive scrub: removed %d stale entries", removed)
+    return removed
+
+
 def build_single_job(config: Config, info: dict) -> DownloadJob:
     meta = build_track_meta(info, playlist_index=None, is_compilation=False)
     artist_dir = sanitize(meta.artist)
@@ -901,6 +951,7 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
         jobs = [build_single_job(config, info)]
 
     logger.info("Starting downloads: %s item(s)", len(jobs))
+    scrub_archive(config, jobs, logger)
     download_error: BaseException | None = None
     with ProgressReporter(total=len(jobs), logger=logger) as progress:
         with ThreadPoolExecutor(max_workers=config.concurrent_downloads) as executor:
