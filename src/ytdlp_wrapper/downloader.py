@@ -367,7 +367,11 @@ def find_existing_file(output_dir: Path, output_stem: str) -> Path | None:
     if not output_dir.exists():
         return None
     escaped = glob.escape(output_stem)
-    matches = list(output_dir.glob(f"{escaped}.*"))
+    matches = [
+        p
+        for p in output_dir.glob(f"{escaped}.*")
+        if ".temp." not in p.name and not p.name.endswith(".pending.json")
+    ]
     return matches[0] if matches else None
 
 

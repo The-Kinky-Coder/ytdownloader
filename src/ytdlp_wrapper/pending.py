@@ -186,9 +186,15 @@ def find_pending_sidecars(
         # we glob for it.
         stem = sidecar.name[: -len(_SIDECAR_SUFFIX)]
         audio_candidates = list(sidecar.parent.glob(f"{stem}.*"))
-        # Exclude the sidecar itself from the candidates.
+        # Exclude the sidecar itself and any yt-dlp temporary audio artifacts
+        # (e.g. foo.temp.opus) from the candidates.  If a .temp. file is chosen
+        # as the audio_file, sidecar_path computes to foo.temp.pending.json which
+        # doesn't exist, so delete() silently no-ops and the real sidecar is
+        # never removed.
         audio_candidates = [
-            p for p in audio_candidates if not p.name.endswith(_SIDECAR_SUFFIX)
+            p
+            for p in audio_candidates
+            if not p.name.endswith(_SIDECAR_SUFFIX) and ".temp." not in p.name
         ]
         if not audio_candidates:
             if logger:

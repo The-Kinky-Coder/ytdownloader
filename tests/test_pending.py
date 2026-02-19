@@ -211,6 +211,26 @@ class TestPendingFileRoundtrip(unittest.TestCase):
         found = find_pending_sidecars(self.tmp, task="sponsorblock")
         self.assertEqual(len(found), 0)
 
+    def test_find_ignores_temp_audio_artifacts(self) -> None:
+        # Regression: yt-dlp leaves behind zero-byte .temp.opus files alongside
+        # the real audio file.  If find_pending_sidecars picked the .temp. file
+        # as the audio_file, sidecar_path would compute to foo.temp.pending.json
+        # (non-existent), causing delete() to silently no-op and the real sidecar
+        # to never be removed.
+        audio = self._make_audio("048-Artist-Song.opus")
+        temp_artifact = self.tmp / "048-Artist-Song.temp.opus"
+        temp_artifact.touch()
+        pf = write_pending(
+            audio, "https://example.com/v=1", "048-Artist-Song", ["sponsorblock"]
+        )
+        found = find_pending_sidecars(self.tmp, task="sponsorblock")
+        self.assertEqual(len(found), 1)
+        # The audio_file must point to the real .opus, not the .temp.opus artifact.
+        self.assertEqual(found[0].audio_file.name, "048-Artist-Song.opus")
+        # Crucially: remove_task must delete the real sidecar, not a phantom path.
+        found[0].remove_task("sponsorblock")
+        self.assertFalse(audio_file_to_sidecar(audio).exists())
+
     def test_find_searches_subdirectories(self) -> None:
         subdir = self.tmp / "Playlist"
         subdir.mkdir()
