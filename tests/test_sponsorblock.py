@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 from collections import deque
-from unittest.mock import MagicMock, patch, call
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from ytdlp_wrapper.downloader import (
     _is_sponsorblock_api_error,
@@ -169,6 +169,128 @@ class TestRetrySponsorblockForJob(unittest.TestCase):
         )
         self.assertTrue(result)
         self.assertEqual(mock_popen.call_count, 2)
+
+
+class TestBootstrapPendingFromLogs(unittest.TestCase):
+    """Tests for _bootstrap_pending_from_logs() log parsing."""
+
+    def _make_config(self, tmp_path: Path) -> MagicMock:
+        cfg = MagicMock()
+        cfg.log_dir = tmp_path
+        cfg.base_dir = str(tmp_path)
+        return cfg
+
+    def _write_errors_log(self, log_dir: Path, lines: list[str]) -> None:
+        (log_dir / "errors.log").write_text("\n".join(lines), encoding="utf-8")
+
+    def _write_success_log(self, log_dir: Path, lines: list[str]) -> None:
+        (log_dir / "success.log").write_text("\n".join(lines), encoding="utf-8")
+
+    def test_bootstrap_parses_real_log_format(self) -> None:
+        """The real errors.log format: TIMESTAMP stem | exit 1 | ERROR: ... | URL"""
+        import tempfile
+        from ytdlp_wrapper.downloader import _bootstrap_pending_from_logs
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            audio = tmp / "048-Sleepermane & Aylior - Topic-Pebbles.opus"
+            audio.touch()
+            self._write_errors_log(
+                tmp,
+                [
+                    "2026-02-19T15:06:05 048-Sleepermane & Aylior - Topic-Pebbles"
+                    " | exit 1 | ERROR: Preprocessing: Unable to communicate with"
+                    " SponsorBlock API: HTTP Error 500: Internal Server Error"
+                    " | https://music.youtube.com/watch?v=YqivYZYykSo",
+                ],
+            )
+            cfg = self._make_config(tmp)
+            logger = MagicMock()
+            created = _bootstrap_pending_from_logs(cfg, logger)
+            self.assertEqual(created, 1)
+            sidecar = tmp / "048-Sleepermane & Aylior - Topic-Pebbles.pending.json"
+            self.assertTrue(sidecar.exists())
+            import json
+
+            data = json.loads(sidecar.read_text())
+            self.assertEqual(
+                data["source_url"], "https://music.youtube.com/watch?v=YqivYZYykSo"
+            )
+            self.assertIn("sponsorblock", data["pending"])
+
+    def test_bootstrap_skips_when_no_audio_file_found(self) -> None:
+        """If the audio file isn't on disk, no sidecar is created."""
+        import tempfile
+        from ytdlp_wrapper.downloader import _bootstrap_pending_from_logs
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            # No audio file created.
+            self._write_errors_log(
+                tmp,
+                [
+                    "2026-02-19T15:06:05 048-Missing-Track"
+                    " | exit 1 | ERROR: Preprocessing: Unable to communicate with"
+                    " SponsorBlock API: HTTP Error 500"
+                    " | https://music.youtube.com/watch?v=abc123",
+                ],
+            )
+            cfg = self._make_config(tmp)
+            created = _bootstrap_pending_from_logs(cfg, MagicMock())
+            self.assertEqual(created, 0)
+
+    def test_bootstrap_is_idempotent(self) -> None:
+        """Running bootstrap twice does not duplicate or overwrite sidecars."""
+        import tempfile
+        from ytdlp_wrapper.downloader import _bootstrap_pending_from_logs
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            audio = tmp / "001-Artist-Song.opus"
+            audio.touch()
+            self._write_errors_log(
+                tmp,
+                [
+                    "2026-02-19T15:06:05 001-Artist-Song"
+                    " | exit 1 | ERROR: Preprocessing: Unable to communicate with"
+                    " SponsorBlock API: HTTP Error 500"
+                    " | https://music.youtube.com/watch?v=xyz",
+                ],
+            )
+            cfg = self._make_config(tmp)
+            logger = MagicMock()
+            first = _bootstrap_pending_from_logs(cfg, logger)
+            second = _bootstrap_pending_from_logs(cfg, logger)
+            self.assertEqual(first, 1)
+            self.assertEqual(second, 0)  # sidecar already exists
+
+    def test_bootstrap_returns_zero_with_no_errors_log(self) -> None:
+        import tempfile
+        from ytdlp_wrapper.downloader import _bootstrap_pending_from_logs
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._make_config(Path(td))
+            self.assertEqual(_bootstrap_pending_from_logs(cfg, MagicMock()), 0)
+
+    def test_bootstrap_also_accepts_legacy_marker(self) -> None:
+        """Our own retry path logs a different string — both should be recognised."""
+        import tempfile
+        from ytdlp_wrapper.downloader import _bootstrap_pending_from_logs
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            audio = tmp / "002-Artist-Song.opus"
+            audio.touch()
+            self._write_errors_log(
+                tmp,
+                [
+                    "2026-02-19T15:10:00 002-Artist-Song"
+                    " | SponsorBlock API unreachable after retries — segments not removed",
+                ],
+            )
+            cfg = self._make_config(tmp)
+            created = _bootstrap_pending_from_logs(cfg, MagicMock())
+            self.assertEqual(created, 1)
 
 
 if __name__ == "__main__":

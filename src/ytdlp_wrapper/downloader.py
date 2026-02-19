@@ -1106,10 +1106,10 @@ def _bootstrap_pending_from_logs(
 ) -> int:
     """One-time migration: scan errors.log for historic SponsorBlock failures.
 
-    For each stem recorded as ``SponsorBlock API unreachable after retries``
-    in errors.log, this attempts to find the corresponding audio file on disk
-    and the source URL from success.log, then writes a sidecar if one doesn't
-    already exist.
+    Parses errors.log for lines containing the SponsorBlock API error string,
+    extracts the source URL (last pipe-delimited field), supplements missing
+    directory info from success.log, then writes sidecars for any audio files
+    found on disk that don't already have one.
 
     Returns the number of sidecars created.
     """
@@ -1119,51 +1119,70 @@ def _bootstrap_pending_from_logs(
         return 0
 
     # Collect stems that have a persistent SponsorBlock failure recorded.
-    sb_failed_stems: set[str] = set()
-    _SB_MARKER = "SponsorBlock API unreachable after retries"
+    # errors.log format:
+    #   TIMESTAMP stem | exit 1 | ERROR: Preprocessing: Unable to communicate with SponsorBlock API... | https://...
+    # The URL is the last |-delimited field; it may also be absent in older log lines.
+    _SB_MARKERS = (
+        "Unable to communicate with SponsorBlock API",
+        "SponsorBlock API unreachable after retries",  # written by our own retry path
+    )
+    stem_to_url: dict[str, str] = {}
     for line in errors_log.read_text(encoding="utf-8").splitlines():
-        # Format: "TIMESTAMP stem | SponsorBlock API unreachable after retries..."
-        if _SB_MARKER not in line:
+        if not any(m in line for m in _SB_MARKERS):
             continue
         # Strip the ISO timestamp prefix (everything up to and including the first space).
         rest = line.split(" ", 1)[-1]
-        stem = rest.split(" | ")[0].strip()
-        if stem:
-            sb_failed_stems.add(stem)
+        parts = [p.strip() for p in rest.split(" | ")]
+        if not parts:
+            continue
+        stem = parts[0]
+        if not stem:
+            continue
+        # The URL is the last field when present (and starts with "http").
+        url = ""
+        if len(parts) >= 2 and parts[-1].startswith("http"):
+            url = parts[-1]
+        stem_to_url[stem] = url
 
-    if not sb_failed_stems:
+    if not stem_to_url:
         return 0
 
-    # Build a stem→source_url and stem→output_dir map from success.log.
-    stem_to_url: dict[str, str] = {}
+    # Supplement missing URLs from success.log when available.
+    # success.log format: "TIMESTAMP stem | /abs/output/dir | https://..."
     stem_to_dir: dict[str, Path] = {}
     if success_log.exists():
         for line in success_log.read_text(encoding="utf-8").splitlines():
-            # Format: "TIMESTAMP stem | /abs/output/dir | https://..."
             rest = line.split(" ", 1)[-1]
             parts = [p.strip() for p in rest.split(" | ")]
             if len(parts) >= 3:
-                stem_to_url[parts[0]] = parts[2]
-                stem_to_dir[parts[0]] = Path(parts[1])
+                s = parts[0]
+                if s in stem_to_url:
+                    if not stem_to_url[s]:
+                        stem_to_url[s] = parts[2]
+                    stem_to_dir[s] = Path(parts[1])
 
     created = 0
-    for stem in sb_failed_stems:
+    for stem, source_url in stem_to_url.items():
         output_dir = stem_to_dir.get(stem)
-        source_url = stem_to_url.get(stem, "")
         if output_dir is None:
-            logger.debug(
-                "Bootstrap: no success.log entry for %s — cannot locate file, skipping.",
-                stem,
-            )
-            continue
-        audio_file = find_existing_file(output_dir, stem)
-        if audio_file is None:
-            logger.debug(
-                "Bootstrap: audio file for %s not found in %s — skipping.",
-                stem,
-                output_dir,
-            )
-            continue
+            # Fall back to a full recursive search under base_dir.
+            audio_file = find_existing_file(Path(config.base_dir), stem)
+            if audio_file is None:
+                logger.debug(
+                    "Bootstrap: audio file for %s not found under %s — skipping.",
+                    stem,
+                    config.base_dir,
+                )
+                continue
+        else:
+            audio_file = find_existing_file(output_dir, stem)
+            if audio_file is None:
+                logger.debug(
+                    "Bootstrap: audio file for %s not found in %s — skipping.",
+                    stem,
+                    output_dir,
+                )
+                continue
         from .pending import audio_file_to_sidecar
 
         if audio_file_to_sidecar(audio_file).exists():
