@@ -10,8 +10,6 @@ post-processing work without re-downloading anything.
 
 The system lives in `src/ytdlp_wrapper/pending.py`.
 
----
-
 ## Sidecar file format
 
 Sidecar files use the suffix `.pending.json` and sit in the same directory as
@@ -44,15 +42,11 @@ the audio file they describe:
 The `pending` list is modified in place as tasks succeed. When the list is
 empty the file is deleted.
 
----
-
 ## Task tokens
 
 | Token | Meaning | Retry command |
 |---|---|---|
 | `sponsorblock` | SponsorBlock segments have not been removed from the audio file | `--retry-sponsorblock` |
-
----
 
 ## Key functions (`pending.py`)
 
@@ -63,8 +57,6 @@ empty the file is deleted.
 | `PendingFile.remove_task(task)` | Remove a task token from the list. Deletes the sidecar if no tasks remain. |
 | `PendingFile.save()` | Write the sidecar to disk. |
 | `PendingFile.delete()` | Delete the sidecar unconditionally. |
-
----
 
 ## How `--retry-sponsorblock` works (`downloader.py`)
 
@@ -82,8 +74,6 @@ empty the file is deleted.
 
 4. **Clear**: on success, calls `pf.remove_task("sponsorblock")`, which
    deletes the sidecar if it is now empty.
-
----
 
 ## Extending the system for future post-processing tasks
 

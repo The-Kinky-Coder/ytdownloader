@@ -1,8 +1,8 @@
 # ytdownloader
 
-YouTube Music downloader CLI — wraps yt-dlp with Navidrome-compatible tagging, SponsorBlock trimming, M3U playlist generation, and a clean progress UI.
+YouTube Music downloader CLI that wraps yt-dlp with Navidrome-compatible tagging, SponsorBlock trimming, M3U playlist generation, and a clean progress UI.
 
-> **Note:** This tool was built primarily for my own use. The defaults (download location, audio format, Navidrome tagging conventions, etc.) reflect my personal setup. It works well for me but your mileage may vary — feel free to adapt it to your needs.
+> **Note:** This tool was built primarily for my own use. The defaults (download location, audio format, Navidrome tagging conventions, etc.) reflect my personal setup. It works well for me but your mileage may vary.
 
 ## Requirements
 
@@ -43,7 +43,7 @@ All config lives in one place:
 ```
 ~/.config/ytdlp-wrapper/
 ├── config.ini      # music directory, SponsorBlock categories
-└── cookies.txt     # optional — yt-dlp cookies (placed here, used automatically)
+└── cookies.txt     # optional yt-dlp cookies (placed here, used automatically)
 ```
 
 Minimal `config.ini`:
@@ -74,7 +74,7 @@ If no URL is provided you will be prompted for one interactively.
 
 ### M3U playlists
 
-A `.m3u` file is written alongside each downloaded playlist so Navidrome can detect it automatically. To rebuild M3U files from existing files on disk (no network required):
+A `.m3u` file is written alongside each downloaded playlist so Navidrome can detect it automatically. To rebuild M3U files from existing files on disk without re-downloading:
 
 ```bash
 ytdlp-wrapper --rewrite-m3u "/media/music/Brother Ali Mix"
@@ -83,7 +83,7 @@ ytdlp-wrapper --rewrite-m3u-all
 
 ### Re-downloading playlists
 
-To re-download all playlists (with SponsorBlock applied), using stored playlist URLs:
+To re-download all playlists with SponsorBlock applied, using stored playlist URLs:
 
 ```bash
 # First time: stamp any playlist folders that are missing their stored URL
@@ -97,7 +97,7 @@ Downloads go to a temp directory first and are swapped in only on success, so or
 
 ### SponsorBlock retries
 
-If the SponsorBlock API is down during a download run (Cloudflare outage, server overload, etc.), tracks are still downloaded normally — the audio is fine, just without sponsor segment removal. The tool writes a small `.pending.json` sidecar file next to each affected track to record what still needs doing.
+If the SponsorBlock API is down during a download run, tracks are still downloaded normally. The audio is fine, just without sponsor segment removal. The tool writes a small `.pending.json` sidecar file next to each affected track to record what still needs doing.
 
 Once the API has recovered, apply SponsorBlock to all pending tracks in one go:
 
@@ -124,7 +124,7 @@ ytdlp-wrapper --retag-all
 
 **SponsorBlock API errors during download**
 
-Tracks still download correctly — the audio is fine. Sidecar files (`.pending.json`) are written next to each affected track. Once the API recovers:
+Tracks still download correctly. Sidecar files (`.pending.json`) are written next to each affected track. Once the API recovers:
 
 ```bash
 ytdlp-wrapper --retry-sponsorblock

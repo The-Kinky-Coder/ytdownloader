@@ -54,20 +54,19 @@ to extend the system for future post-processing tasks.
 
 `--retry-sponsorblock` writes two types of marker lines to `errors.log`:
 
-**Transient failure** — API was unreachable; sidecar kept for next attempt:
+**Transient failure** (API was unreachable; sidecar kept for next attempt):
 
 ```
 2026-02-19T16:01:05 048-Artist-Track | SponsorBlock retry failed — sidecar kept for next attempt
 ```
 
-**Resolved (no segments)** — SponsorBlock confirmed this video has no segments
-in its database; the file is clean and the sidecar has been removed:
+**Resolved (no segments)** (SponsorBlock confirmed this video has no segments
+in its database; the file is clean and the sidecar has been removed):
 
 ```
 2026-02-19T16:15:22 048-Artist-Track | SponsorBlock resolved — no segments in database
 ```
 
-The bootstrap (`_bootstrap_pending_from_logs`) reads both types.  Stems with a
-resolved marker are permanently excluded from sidecar creation on future runs —
-they will never appear in `--retry-sponsorblock` again.  The `sponsorblock_done.log`
-file (used in earlier versions) is no longer written or read.
+Both marker types are read by `--retry-sponsorblock` on startup. Stems with a
+resolved marker are permanently excluded from sidecar creation on future runs,
+so they will never appear in `--retry-sponsorblock` again.

@@ -5,7 +5,7 @@ All configuration lives in one directory: `~/.config/ytdlp-wrapper/`
 ```
 ~/.config/ytdlp-wrapper/
 ├── config.ini      # main settings (paths, SponsorBlock categories)
-└── cookies.txt     # optional — yt-dlp cookies file
+└── cookies.txt     # optional yt-dlp cookies file
 ```
 
 ## config.ini
