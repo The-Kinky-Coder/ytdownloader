@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 USER_CONFIG_PATH = Path("~/.config/ytdlp-wrapper/config.ini").expanduser()
+USER_CONFIG_DIR = USER_CONFIG_PATH.parent
+
+# Cookies can live in the ytdlp-wrapper config dir as a convenience.
+# If found there it is copied to the yt-dlp standard location on startup.
+WRAPPER_COOKIES_PATH = USER_CONFIG_DIR / "cookies.txt"
+YTDLP_COOKIES_PATH = Path("~/.config/yt-dlp/cookies.txt").expanduser()
 
 
 def load_user_config(config_path: Path = USER_CONFIG_PATH) -> dict:
@@ -15,9 +21,11 @@ def load_user_config(config_path: Path = USER_CONFIG_PATH) -> dict:
     Only keys that are explicitly set in the file are returned — missing keys
     are omitted so callers can distinguish "not set" from "set to default".
 
-    Example config.ini:
-        [ytdlp-wrapper]
-        base_dir = /mnt/nas/music
+    Supported keys (all in [ytdlp-wrapper] section):
+        base_dir                 = /media/music
+        log_dir                  = /media/music/.logs
+        download_archive         = /media/music/.logs/download_archive.txt
+        sponsorblock_categories  = sponsor,selfpromo,interaction
     """
     if not config_path.exists():
         return {}
@@ -33,7 +41,7 @@ def load_user_config(config_path: Path = USER_CONFIG_PATH) -> dict:
 class Config:
     base_dir: Path = Path("/media/music")
     log_dir: Path = Path("/media/music/.logs")
-    cookies_path: Path = Path("~/.config/yt-dlp/cookies.txt").expanduser()
+    cookies_path: Path = YTDLP_COOKIES_PATH
     download_archive: Path = Path("/media/music/.logs/download_archive.txt")
     metadata_cache_dir: Path = Path("~/.cache/ytdownloader/metadata").expanduser()
     metadata_cache_ttl_days: int = 30
@@ -47,13 +55,9 @@ class Config:
     audio_format: str = "opus"
     yt_dlp_bin: str = "yt-dlp"
     ffmpeg_bin: str = "ffmpeg"
-    # Path to the SponsorBlock categories config file.
-    # Resolved at runtime relative to CWD so it works regardless of install location.
-    sponsorblock_config: Path = Path(
-        "~/.config/ytdlp-wrapper/sponsorblock.txt"
-    ).expanduser()
-    # Tuple of SponsorBlock category strings to remove, loaded from sponsorblock_config.
+    # Tuple of SponsorBlock category strings to remove.
     # Empty tuple = SponsorBlock disabled (no --sponsorblock-remove flag passed).
+    # Loaded from config.ini [ytdlp-wrapper] sponsorblock_categories key.
     sponsorblock_categories: tuple[str, ...] = field(default_factory=tuple)
 
     def with_overrides(
@@ -73,7 +77,6 @@ class Config:
         concurrent_downloads: int | None = None,
         retries: int | None = None,
         audio_format: str | None = None,
-        sponsorblock_config: str | None = None,
         sponsorblock_categories: tuple[str, ...] | None = None,
     ) -> "Config":
         return Config(
@@ -113,9 +116,6 @@ class Config:
             else self.audio_format,
             yt_dlp_bin=self.yt_dlp_bin,
             ffmpeg_bin=self.ffmpeg_bin,
-            sponsorblock_config=Path(sponsorblock_config)
-            if sponsorblock_config
-            else self.sponsorblock_config,
             sponsorblock_categories=sponsorblock_categories
             if sponsorblock_categories is not None
             else self.sponsorblock_categories,

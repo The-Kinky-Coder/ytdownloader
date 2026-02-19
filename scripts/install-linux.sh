@@ -78,11 +78,16 @@ mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_DIR/config.ini" <<EOF
 [ytdlp-wrapper]
 base_dir = ${MUSIC_DIR}
+
+# SponsorBlock: comma-separated list of categories to remove from downloads.
+# Remove the leading '#' on the line below to enable.
+# sponsorblock_categories = sponsor,selfpromo,interaction
 EOF
 if [[ -n "${SUDO_USER:-}" ]]; then
   chown -R "$SUDO_USER":"$SUDO_USER" "$CONFIG_DIR"
 fi
 echo "Config written to: $CONFIG_DIR/config.ini"
+echo "Cookies: place cookies.txt in $CONFIG_DIR/ and it will be used automatically."
 
 if $INSTALL_PIP_DEPS; then
   if [[ -z "$VENV_PATH" ]]; then

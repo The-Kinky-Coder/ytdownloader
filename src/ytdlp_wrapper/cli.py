@@ -7,14 +7,13 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import Config, load_user_config
+from .config import Config, WRAPPER_COOKIES_PATH, YTDLP_COOKIES_PATH, load_user_config
 from .downloader import (
     DownloadError,
     copy_cookies,
     download_url,
     ensure_dependencies,
     ensure_log_dirs,
-    load_sponsorblock_categories,
 )
 
 
@@ -190,6 +189,11 @@ def main(argv: list[str] | None = None) -> int:
         or user_cfg.get("download_archive")
         or f"{log_dir}/download_archive.txt"
     )
+    # SponsorBlock categories: CLI not exposed, so config file only.
+    # Value is a comma-separated string like "sponsor,selfpromo,interaction".
+    # Empty/absent = SponsorBlock disabled.
+    _sb_raw = user_cfg.get("sponsorblock_categories", "")
+    sponsorblock_categories = tuple(c.strip() for c in _sb_raw.split(",") if c.strip())
 
     config = Config().with_overrides(
         base_dir=base_dir,
@@ -205,18 +209,36 @@ def main(argv: list[str] | None = None) -> int:
         concurrent_downloads=args.concurrency,
         retries=args.retries,
         audio_format=args.audio_format,
+        sponsorblock_categories=sponsorblock_categories,
     )
     logger = configure_logging(config.log_dir)
 
-    # Load SponsorBlock categories from sponsorblock.txt in the project root.
-    sb_categories = load_sponsorblock_categories(config.sponsorblock_config, logger)
-    config = config.with_overrides(sponsorblock_categories=sb_categories)
+    if sponsorblock_categories:
+        logger.info(
+            "SponsorBlock enabled — removing categories: %s",
+            ", ".join(sponsorblock_categories),
+        )
+    else:
+        logger.info("SponsorBlock disabled (no categories set in config.ini)")
 
     try:
         ensure_dependencies(config)
         ensure_log_dirs(config)
+        # Cookies resolution order:
+        #   1. --cookies CLI flag (explicit path, copied to yt-dlp location)
+        #   2. ~/.config/ytdlp-wrapper/cookies.txt (convenience location,
+        #      auto-copied to yt-dlp location if not already there)
+        #   3. ~/.config/yt-dlp/cookies.txt (yt-dlp standard location, used as-is)
         if args.cookies:
             copy_cookies(config, args.cookies, logger)
+        elif WRAPPER_COOKIES_PATH.exists() and not YTDLP_COOKIES_PATH.exists():
+            import shutil as _shutil
+
+            YTDLP_COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copy(WRAPPER_COOKIES_PATH, YTDLP_COOKIES_PATH)
+            logger.info(
+                "Copied cookies from %s to %s", WRAPPER_COOKIES_PATH, YTDLP_COOKIES_PATH
+            )
         if config.cookies_path.exists():
             logger.info("Using cookies from %s", config.cookies_path)
         if args.purge_metadata_cache:
