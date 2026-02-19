@@ -2,8 +2,31 @@
 
 from __future__ import annotations
 
+import configparser
 from dataclasses import dataclass, field
 from pathlib import Path
+
+USER_CONFIG_PATH = Path("~/.config/ytdlp-wrapper/config.ini").expanduser()
+
+
+def load_user_config(config_path: Path = USER_CONFIG_PATH) -> dict:
+    """Read ~/.config/ytdlp-wrapper/config.ini and return overrides as a dict.
+
+    Only keys that are explicitly set in the file are returned — missing keys
+    are omitted so callers can distinguish "not set" from "set to default".
+
+    Example config.ini:
+        [ytdlp-wrapper]
+        base_dir = /mnt/nas/music
+    """
+    if not config_path.exists():
+        return {}
+    parser = configparser.ConfigParser()
+    parser.read(config_path, encoding="utf-8")
+    section = "ytdlp-wrapper"
+    if not parser.has_section(section):
+        return {}
+    return dict(parser[section])
 
 
 @dataclass(frozen=True)

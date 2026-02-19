@@ -3,6 +3,7 @@ set -euo pipefail
 
 INSTALL_PIP_DEPS=false
 VENV_PATH=""
+MUSIC_DIR=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -14,10 +15,14 @@ for arg in "$@"; do
     --venv-path=*)
       VENV_PATH="${arg#*=}"
       ;;
+    --music-dir=*)
+      MUSIC_DIR="${arg#*=}"
+      ;;
     -h|--help)
-      echo "Usage: $0 [--with-pip-deps]"
-      echo "  --with-pip-deps      Install optional pip packages (rich, mutagen) into a venv"
-      echo "  --venv-path=/path    Override venv location (default: /home/<user>/.ytdlp-wrapper-venv)"
+      echo "Usage: $0 [--with-pip-deps] [--music-dir=/path/to/music]"
+      echo "  --with-pip-deps        Install optional pip packages (rich, mutagen) into a venv"
+      echo "  --venv-path=/path      Override venv location (default: /home/<user>/.ytdlp-wrapper-venv)"
+      echo "  --music-dir=/path      Music download directory (will be prompted if not provided)"
       exit 0
       ;;
     *)
@@ -37,6 +42,16 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 1
 fi
 
+# Prompt for music directory if not provided via flag
+if [[ -z "$MUSIC_DIR" ]]; then
+  echo ""
+  read -rp "Where should music be downloaded? [/media/music]: " MUSIC_DIR
+  MUSIC_DIR="${MUSIC_DIR:-/media/music}"
+fi
+# Strip trailing slash
+MUSIC_DIR="${MUSIC_DIR%/}"
+echo "Music directory: $MUSIC_DIR"
+
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update -y
@@ -46,12 +61,28 @@ if ! command -v yt-dlp >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends yt-dlp
 fi
 
-LOG_DIR="/media/music/.logs"
+LOG_DIR="${MUSIC_DIR}/.logs"
 mkdir -p "$LOG_DIR"
 chmod 775 "$LOG_DIR"
 if [[ -n "${SUDO_USER:-}" ]]; then
   chown -R "$SUDO_USER":"$SUDO_USER" "$LOG_DIR"
 fi
+
+# Write user config file so the CLI knows where music lives
+if [[ -n "${SUDO_USER:-}" ]]; then
+  CONFIG_DIR="/home/${SUDO_USER}/.config/ytdlp-wrapper"
+else
+  CONFIG_DIR="${HOME}/.config/ytdlp-wrapper"
+fi
+mkdir -p "$CONFIG_DIR"
+cat > "$CONFIG_DIR/config.ini" <<EOF
+[ytdlp-wrapper]
+base_dir = ${MUSIC_DIR}
+EOF
+if [[ -n "${SUDO_USER:-}" ]]; then
+  chown -R "$SUDO_USER":"$SUDO_USER" "$CONFIG_DIR"
+fi
+echo "Config written to: $CONFIG_DIR/config.ini"
 
 if $INSTALL_PIP_DEPS; then
   if [[ -z "$VENV_PATH" ]]; then

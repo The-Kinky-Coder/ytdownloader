@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import Config
+from .config import Config, load_user_config
 from .downloader import (
     DownloadError,
     copy_cookies,
@@ -35,13 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cookies", help="Path to cookies.txt to copy into yt-dlp config"
     )
-    parser.add_argument(
-        "--base-dir", default="/media/music", help="Base download directory"
-    )
-    parser.add_argument("--log-dir", default="/media/music/.logs", help="Log directory")
+    parser.add_argument("--base-dir", default=None, help="Base download directory")
+    parser.add_argument("--log-dir", default=None, help="Log directory")
     parser.add_argument(
         "--download-archive",
-        default="/media/music/.logs/download_archive.txt",
+        default=None,
         help="yt-dlp download archive file",
     )
     parser.add_argument(
@@ -179,10 +177,24 @@ def main(argv: list[str] | None = None) -> int:
     if not url and not args.purge_metadata_cache and not _offline_mode:
         parser.error("url is required")
 
+    # Load user config file, then apply CLI args on top.
+    # Priority (highest to lowest): CLI args > config file > hardcoded defaults.
+    user_cfg = load_user_config()
+
+    # Resolve base_dir: CLI > config file > hardcoded default
+    base_dir = args.base_dir or user_cfg.get("base_dir") or "/media/music"
+    # log_dir and download_archive derive from base_dir unless explicitly set
+    log_dir = args.log_dir or user_cfg.get("log_dir") or f"{base_dir}/.logs"
+    download_archive = (
+        args.download_archive
+        or user_cfg.get("download_archive")
+        or f"{log_dir}/download_archive.txt"
+    )
+
     config = Config().with_overrides(
-        base_dir=args.base_dir,
-        log_dir=args.log_dir,
-        download_archive=args.download_archive,
+        base_dir=base_dir,
+        log_dir=log_dir,
+        download_archive=download_archive,
         metadata_cache_dir=args.metadata_cache_dir,
         metadata_cache_ttl_days=args.metadata_cache_ttl_days,
         metadata_cache_enabled=not args.disable_metadata_cache,
