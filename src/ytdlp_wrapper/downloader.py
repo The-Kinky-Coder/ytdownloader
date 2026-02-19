@@ -27,6 +27,7 @@ from .pending import (
     write_pending,
 )
 from .progress import ProgressReporter
+from .sponsorblock_local import extract_video_id, fetch_segments, remove_segments_ffmpeg
 from .utils import parse_artist_title, safe_int, sanitize
 
 
@@ -1139,19 +1140,23 @@ def _bootstrap_pending_from_logs(
     if not errors_log.exists():
         return 0
 
+    # Markers that indicate a SponsorBlock failure — stems matching these lines
+    # are candidates for sidecar creation.
+    _SB_FAILURE_MARKERS = (
+        "Unable to communicate with SponsorBlock API",
+        "SponsorBlock API unreachable after retries",  # written by our own retry path
+    )
+    # Marker written when SponsorBlock confirmed no segments exist for the track.
+    # Stems with this marker are permanently resolved — never create a sidecar.
+    _SB_RESOLVED_MARKER = "SponsorBlock resolved — no segments in database"
+
     # Collect stems that have a persistent SponsorBlock failure recorded.
     # errors.log format:
     #   TIMESTAMP stem | exit 1 | ERROR: Preprocessing: Unable to communicate with SponsorBlock API... | https://...
     # The URL is the last |-delimited field; it may also be absent in older log lines.
-    _SB_MARKERS = (
-        "Unable to communicate with SponsorBlock API",
-        "SponsorBlock API unreachable after retries",  # written by our own retry path
-    )
     stem_to_url: dict[str, str] = {}
+    resolved_stems: set[str] = set()
     for line in errors_log.read_text(encoding="utf-8").splitlines():
-        if not any(m in line for m in _SB_MARKERS):
-            continue
-        # Strip the ISO timestamp prefix (everything up to and including the first space).
         rest = line.split(" ", 1)[-1]
         parts = [p.strip() for p in rest.split(" | ")]
         if not parts:
@@ -1159,25 +1164,19 @@ def _bootstrap_pending_from_logs(
         stem = parts[0]
         if not stem:
             continue
+        if _SB_RESOLVED_MARKER in line:
+            # This stem was confirmed clean — exclude it permanently.
+            resolved_stems.add(stem)
+            continue
+        if not any(m in line for m in _SB_FAILURE_MARKERS):
+            continue
         # The URL is the last field when present (and starts with "http").
         url = ""
         if len(parts) >= 2 and parts[-1].startswith("http"):
             url = parts[-1]
         stem_to_url[stem] = url
 
-    if not stem_to_url:
-        return 0
-
-    # Skip stems that were already successfully resolved in a previous retry run.
-    done_log = config.log_dir / "sponsorblock_done.log"
-    resolved_stems: set[str] = set()
-    if done_log.exists():
-        for line in done_log.read_text(encoding="utf-8").splitlines():
-            s = (
-                line.strip().split(" ", 1)[-1].strip()
-            )  # strip optional timestamp prefix
-            if s:
-                resolved_stems.add(s)
+    # Remove any stems that were later confirmed as having no segments.
     if resolved_stems:
         stem_to_url = {s: u for s, u in stem_to_url.items() if s not in resolved_stems}
 
@@ -1322,9 +1321,6 @@ def process_pending_sponsorblock(config: Config, logger: logging.Logger) -> None
         success = _retry_sponsorblock_for_job(config, job, logger, pending_file=pf)
         if success:
             succeeded.append(pf.output_stem)
-            # Record in sponsorblock_done.log so the bootstrap doesn't recreate
-            # the sidecar on subsequent runs.
-            append_log_line(config, "sponsorblock_done.log", pf.output_stem)
         else:
             failed.append(pf.output_stem)
             append_log_line(
@@ -1771,122 +1767,126 @@ def _retry_sponsorblock_for_job(
     attempts: int = _SPONSORBLOCK_RETRY_ATTEMPTS,
     pending_file: "PendingFile | None" = None,
 ) -> bool:
-    """Re-run yt-dlp with SponsorBlock post-processing for an already-downloaded file.
+    """Apply SponsorBlock segment removal locally for an already-downloaded file.
 
-    Uses a throwaway download archive so yt-dlp re-downloads and re-processes
-    the file even though it was already recorded in the real archive.
+    Calls the SponsorBlock REST API directly to fetch segment timestamps, then
+    uses ffmpeg to cut/mute those segments from the local audio file.  No
+    re-download from YouTube is performed.
+
+    Flow:
+    1. Extract the video ID from ``job.source_url``.
+    2. Query the SponsorBlock API.
+    3. If the API returns a transient error: return False (keep sidecar).
+    4. If the API returns no segments (404): clear sidecar, write resolved
+       marker to errors.log, return True.
+    5. If segments are found: run ffmpeg to remove them, clear sidecar,
+       return True.
 
     If *pending_file* is supplied and processing succeeds, the
     ``sponsorblock`` task is removed from it (and the sidecar deleted if no
     tasks remain).
 
-    Returns True if SponsorBlock was applied successfully, False otherwise.
+    Returns True if the track is now clean, False on transient failure.
     """
+    import urllib.error as _uerr
+
     source_url = job.source_url or job.meta.webpage_url
-    with tempfile.TemporaryDirectory(
-        prefix=f"ytdl_sb_retry_{job.output_stem[:40]}_"
-    ) as tmp_str:
-        tmp_dir = Path(tmp_str)
-        throwaway_archive = tmp_dir / "sb_retry_archive.txt"
-        # Output to the temp dir, not the real output dir, so yt-dlp's temp
-        # files (.temp.*, .part, etc.) don't clobber our sidecar or the real
-        # audio file mid-run.  On success we atomically move the result over.
-        tmp_output_template = str(tmp_dir / f"{job.output_stem}.%(ext)s")
-        sb_config = config.with_overrides(download_archive=str(throwaway_archive))
-        args = _yt_dlp_args_reprocess(
-            sb_config, job, output_template=tmp_output_template
+
+    # ── Step 1: Extract video ID ────────────────────────────────────────────
+    video_id = extract_video_id(source_url) if source_url else None
+    if not video_id:
+        logger.warning(
+            "SponsorBlock retry: cannot extract video ID from URL %r — skipping %s",
+            source_url,
+            job.output_stem,
         )
-        args.append(source_url)
+        return False
 
-        for attempt in range(1, attempts + 1):
-            logger.debug(
-                "SponsorBlock retry %s/%s for %s", attempt, attempts, job.output_stem
+    # ── Step 2: Query SponsorBlock API ──────────────────────────────────────
+    categories = config.sponsorblock_categories or ()
+    segments = None
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            time.sleep(config.sleep_interval)
+        try:
+            segments = fetch_segments(video_id, categories, logger=logger)
+            break  # success (including 404 → empty list)
+        except _uerr.HTTPError as exc:
+            logger.warning(
+                "SponsorBlock API error (attempt %d/%d) for %s: HTTP %d",
+                attempt,
+                attempts,
+                job.output_stem,
+                exc.code,
             )
-            if attempt > 1:
-                time.sleep(config.sleep_interval)
-            process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+        except OSError as exc:
+            logger.warning(
+                "SponsorBlock API unreachable (attempt %d/%d) for %s: %s",
+                attempt,
+                attempts,
+                job.output_stem,
+                exc,
             )
-            assert process.stdout
-            last_lines: deque[str] = deque(maxlen=50)
-            no_segments = False
-            for line in process.stdout:
-                stripped = line.rstrip()
-                last_lines.append(stripped)
-                if (
-                    "No matching segments were found in the SponsorBlock database"
-                    in stripped
-                ):
-                    no_segments = True
-            process.wait()
 
-            if no_segments:
-                # SponsorBlock API is reachable but has no segments for this
-                # track — that is not an error.  The file is already clean.
-                logger.info(
-                    "SponsorBlock: no segments found for %s — file is already clean.",
-                    job.output_stem,
-                )
-                if pending_file is not None:
-                    pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
-                return True
+    if segments is None:
+        # All attempts exhausted — transient failure.
+        logger.warning(
+            "SponsorBlock retry failed for %s after %d attempt(s) — API unreachable.",
+            job.output_stem,
+            attempts,
+        )
+        return False
 
-            if process.returncode == 0:
-                # Move the processed file from tmp to the real output dir.
-                tmp_audio = next(
-                    (
-                        p
-                        for p in tmp_dir.iterdir()
-                        if p.suffix and not p.name.endswith(".txt")
-                    ),
-                    None,
-                )
-                if tmp_audio is not None:
-                    dest = job.output_dir / tmp_audio.name
-                    shutil.move(str(tmp_audio), dest)
-                    logger.info(
-                        "SponsorBlock applied successfully on retry for %s",
-                        job.output_stem,
-                    )
-                else:
-                    logger.warning(
-                        "SponsorBlock retry for %s: yt-dlp exited 0 but no output file found in %s",
-                        job.output_stem,
-                        tmp_dir,
-                    )
-                if pending_file is not None:
-                    pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
-                return True
+    # ── Step 3: No segments found ───────────────────────────────────────────
+    if not segments:
+        logger.info(
+            "SponsorBlock: no segments in database for %s — file is already clean.",
+            job.output_stem,
+        )
+        if pending_file is not None:
+            pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
+        # Write a resolved marker so bootstrap never re-creates a sidecar for
+        # this stem — it is permanently clean as far as SponsorBlock is concerned.
+        append_log_line(
+            config,
+            "errors.log",
+            f"{job.output_stem} | SponsorBlock resolved — no segments in database",
+        )
+        return True
 
-            reason = _extract_failure_reason(last_lines, process.returncode)
-            if attempt < attempts:
-                logger.debug(
-                    "SponsorBlock retry %s/%s failed for %s: %s",
-                    attempt,
-                    attempts,
-                    job.output_stem,
-                    reason,
-                )
-            else:
-                # Log the full tail of yt-dlp output so the user can see the
-                # real underlying error (e.g. ffmpeg stderr, HTTP error detail).
-                relevant = [
-                    l
-                    for l in last_lines
-                    if l.strip() and not l.startswith("[download]")
-                ]
-                detail = "\n  ".join(relevant[-10:]) if relevant else reason
-                logger.warning(
-                    "SponsorBlock retry failed for %s after %d attempt(s):\n  %s",
-                    job.output_stem,
-                    attempts,
-                    detail,
-                )
-    return False
+    # ── Step 4: Remove segments with ffmpeg ─────────────────────────────────
+    audio_file = find_existing_file(job.output_dir, job.output_stem)
+    if audio_file is None:
+        logger.warning(
+            "SponsorBlock retry: audio file for %s not found in %s.",
+            job.output_stem,
+            job.output_dir,
+        )
+        return False
+
+    try:
+        remove_segments_ffmpeg(
+            audio_file,
+            segments,
+            ffmpeg_bin=config.ffmpeg_bin,
+            logger=logger,
+        )
+    except RuntimeError as exc:
+        logger.warning(
+            "ffmpeg segment removal failed for %s: %s",
+            job.output_stem,
+            exc,
+        )
+        return False
+
+    logger.info(
+        "SponsorBlock applied successfully for %s (%d segment(s) removed).",
+        job.output_stem,
+        len(segments),
+    )
+    if pending_file is not None:
+        pending_file.remove_task(PENDING_TASK_SPONSORBLOCK)
+    return True
 
 
 def _reprocess_download_job(
