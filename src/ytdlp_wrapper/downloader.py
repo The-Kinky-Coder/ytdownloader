@@ -1100,6 +1100,27 @@ def write_playlist_m3u(
             logger.warning("  missing: %s", stem)
 
 
+def _cleanup_temp_sidecars(base_dir: Path, logger: logging.Logger) -> None:
+    """Delete yt-dlp temporary sidecar artifacts (e.g. foo.temp.pending.json).
+
+    These are left behind when a reprocess run is interrupted or when yt-dlp
+    writes a temp file alongside the audio during download and fails to clean
+    up.  They are safe to delete unconditionally.
+    """
+    from .pending import _SIDECAR_SUFFIX
+
+    removed = 0
+    for path in base_dir.rglob(f"*.temp{_SIDECAR_SUFFIX}"):
+        try:
+            path.unlink()
+            logger.debug("Removed temp sidecar artifact: %s", path.name)
+            removed += 1
+        except OSError as exc:
+            logger.warning("Could not remove temp sidecar %s: %s", path, exc)
+    if removed:
+        logger.info("Removed %d temporary sidecar artifact(s).", removed)
+
+
 def _bootstrap_pending_from_logs(
     config: Config,
     logger: logging.Logger,
@@ -1219,6 +1240,10 @@ def process_pending_sponsorblock(config: Config, logger: logging.Logger) -> None
             "Set sponsorblock_categories in config.ini first."
         )
         return
+
+    # Clean up any yt-dlp temporary sidecar artifacts left behind by failed
+    # reprocess runs (e.g. foo.temp.pending.json).
+    _cleanup_temp_sidecars(config.base_dir, logger)
 
     # Bootstrap sidecars from historic log entries so that files that failed
     # before the sidecar system was added are also picked up.
@@ -1761,7 +1786,7 @@ def _retry_sponsorblock_for_job(
                 bufsize=1,
             )
             assert process.stdout
-            last_lines: deque[str] = deque(maxlen=20)
+            last_lines: deque[str] = deque(maxlen=50)
             for line in process.stdout:
                 last_lines.append(line.rstrip())
             process.wait()
@@ -1782,11 +1807,19 @@ def _retry_sponsorblock_for_job(
                     reason,
                 )
             else:
+                # Log the full tail of yt-dlp output so the user can see the
+                # real underlying error (e.g. ffmpeg stderr, HTTP error detail).
+                relevant = [
+                    l
+                    for l in last_lines
+                    if l.strip() and not l.startswith("[download]")
+                ]
+                detail = "\n  ".join(relevant[-10:]) if relevant else reason
                 logger.warning(
-                    "SponsorBlock retry failed for %s after %d attempt(s): %s",
+                    "SponsorBlock retry failed for %s after %d attempt(s):\n  %s",
                     job.output_stem,
                     attempts,
-                    reason,
+                    detail,
                 )
     return False
 
@@ -1861,7 +1894,12 @@ def _reprocess_download_job(
 
 
 def _yt_dlp_args_reprocess(config: Config, job: DownloadJob) -> list[str]:
-    """Build yt-dlp args for reprocess mode: no --no-overwrites, throwaway archive."""
+    """Build yt-dlp args for reprocess mode: no --no-overwrites, throwaway archive.
+
+    Intentionally omits --embed-thumbnail / --add-metadata because those require
+    AtomicParsley or specific ffmpeg builds and are not needed for SponsorBlock
+    segment removal.  The existing embedded tags and thumbnail are preserved as-is.
+    """
     args = [
         config.yt_dlp_bin,
         "--newline",
@@ -1871,8 +1909,9 @@ def _yt_dlp_args_reprocess(config: Config, job: DownloadJob) -> list[str]:
         "--audio-format",
         config.audio_format,
         "--embed-metadata",
-        "--embed-thumbnail",
-        "--add-metadata",
+        # --embed-thumbnail and --add-metadata intentionally omitted — they are
+        # not needed for SponsorBlock segment removal and can cause
+        # "Conversion failed!" errors when AtomicParsley is unavailable.
         "-f",
         "bestaudio",
         "--download-archive",

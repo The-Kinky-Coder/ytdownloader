@@ -175,6 +175,12 @@ def find_pending_sidecars(
     """
     results: list[PendingFile] = []
     for sidecar in sorted(base_dir.rglob(f"*{_SIDECAR_SUFFIX}")):
+        # Skip yt-dlp temporary files (e.g. foo.temp.pending.json) — these are
+        # in-progress download artifacts left behind on interrupted runs.
+        if ".temp." in sidecar.name:
+            if logger:
+                logger.debug("Skipping temporary sidecar artifact: %s", sidecar.name)
+            continue
         # Derive the audio file path by replacing the sidecar suffix with an
         # empty suffix — we don't know the audio extension ahead of time, so
         # we glob for it.
