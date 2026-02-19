@@ -364,13 +364,20 @@ def make_output_stem(meta: TrackMeta, *, track_prefix: str | None = None) -> str
 
 
 def find_existing_file(output_dir: Path, output_stem: str) -> Path | None:
+    """Return the first audio file matching *output_stem* in *output_dir*.
+
+    Uses an allowlist of known audio extensions (``_AUDIO_EXTS``) so that
+    sibling artifacts produced by yt-dlp — thumbnails (``.webp``), temporary
+    download files (``.temp.opus``), sidecar JSON (``.pending.json``) — are
+    never mistakenly returned as the audio file.
+    """
     if not output_dir.exists():
         return None
     escaped = glob.escape(output_stem)
     matches = [
         p
         for p in output_dir.glob(f"{escaped}.*")
-        if ".temp." not in p.name and not p.name.endswith(".pending.json")
+        if p.suffix in _AUDIO_EXTS and ".temp." not in p.name
     ]
     return matches[0] if matches else None
 
@@ -1106,15 +1113,27 @@ def write_playlist_m3u(
 
 
 def _cleanup_temp_sidecars(base_dir: Path, logger: logging.Logger) -> None:
-    """Delete yt-dlp temporary sidecar artifacts (e.g. foo.temp.pending.json).
+    """Delete yt-dlp temporary artifacts left behind by interrupted runs.
 
-    These are left behind when a reprocess run is interrupted or when yt-dlp
-    writes a temp file alongside the audio during download and fails to clean
-    up.  They are safe to delete unconditionally.
+    Cleans up two categories of files:
+
+    1. **Temp sidecar files** (``foo.temp.pending.json``) — written by our own
+       reprocess path and not cleaned up on interruption.
+    2. **Zero-byte temp audio files** (``foo.temp.opus``, ``foo.temp.m4a``,
+       etc.) — written by yt-dlp during download/reprocess and left behind when
+       the process is killed before it can rename them to the final filename.
+       Only zero-byte files are removed; a non-zero file could be a legitimate
+       partial download that the user may want to resume.
+
+    Both kinds are safe to delete: if the real audio file exists alongside
+    them, they are redundant; if it doesn't, the download will be retried
+    from scratch anyway.
     """
-    from .pending import _SIDECAR_SUFFIX
+    from .pending import _AUDIO_EXTS, _SIDECAR_SUFFIX
 
     removed = 0
+
+    # Category 1: temp sidecar JSON files.
     for path in base_dir.rglob(f"*.temp{_SIDECAR_SUFFIX}"):
         try:
             path.unlink()
@@ -1122,8 +1141,25 @@ def _cleanup_temp_sidecars(base_dir: Path, logger: logging.Logger) -> None:
             removed += 1
         except OSError as exc:
             logger.warning("Could not remove temp sidecar %s: %s", path, exc)
+
+    # Category 2: zero-byte temp audio files (e.g. foo.temp.opus).
+    for ext in _AUDIO_EXTS:
+        for path in base_dir.rglob(f"*.temp{ext}"):
+            if path.stat().st_size != 0:
+                logger.debug(
+                    "Skipping non-zero temp audio artifact (may be in progress): %s",
+                    path.name,
+                )
+                continue
+            try:
+                path.unlink()
+                logger.debug("Removed zero-byte temp audio artifact: %s", path.name)
+                removed += 1
+            except OSError as exc:
+                logger.warning("Could not remove temp audio artifact %s: %s", path, exc)
+
     if removed:
-        logger.info("Removed %d temporary sidecar artifact(s).", removed)
+        logger.info("Removed %d temporary artifact(s).", removed)
 
 
 def _bootstrap_pending_from_logs(

@@ -44,6 +44,12 @@ _SIDECAR_SUFFIX = ".pending.json"
 
 _FORMAT_VERSION = 1
 
+# Known audio extensions produced by yt-dlp.  Used as an allowlist when
+# resolving which file alongside a sidecar is the real audio file, so that
+# yt-dlp artifacts (thumbnails, zero-byte .temp.* files, etc.) are never
+# mistakenly selected.
+_AUDIO_EXTS = {".opus", ".m4a", ".mp3", ".flac", ".ogg", ".webm", ".aac"}
+
 
 @dataclass
 class PendingFile:
@@ -183,18 +189,14 @@ def find_pending_sidecars(
             continue
         # Derive the audio file path by replacing the sidecar suffix with an
         # empty suffix — we don't know the audio extension ahead of time, so
-        # we glob for it.
+        # we glob for it.  Use an allowlist of known audio extensions so that
+        # yt-dlp artifacts (thumbnails, zero-byte .temp.* files, etc.) are
+        # never mistakenly selected as the audio file.
         stem = sidecar.name[: -len(_SIDECAR_SUFFIX)]
-        audio_candidates = list(sidecar.parent.glob(f"{stem}.*"))
-        # Exclude the sidecar itself and any yt-dlp temporary audio artifacts
-        # (e.g. foo.temp.opus) from the candidates.  If a .temp. file is chosen
-        # as the audio_file, sidecar_path computes to foo.temp.pending.json which
-        # doesn't exist, so delete() silently no-ops and the real sidecar is
-        # never removed.
         audio_candidates = [
             p
-            for p in audio_candidates
-            if not p.name.endswith(_SIDECAR_SUFFIX) and ".temp." not in p.name
+            for p in sidecar.parent.glob(f"{stem}.*")
+            if p.suffix in _AUDIO_EXTS and ".temp." not in p.name
         ]
         if not audio_candidates:
             if logger:
