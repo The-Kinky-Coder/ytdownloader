@@ -72,6 +72,29 @@ ytdlp-wrapper --url https://music.youtube.com/playlist?list=...
 
 If no URL is provided you will be prompted for one interactively.
 
+### Audio normalization
+
+By default the CLI normalizes the loudness of every file it downloads using
+ffmpeg's EBU‑R128 two‑pass filter.  Normalization occurs *after* downloads
+complete so the concurrent download threads aren't slowed by the CPU‑heavy
+processing.  Files already tagged with the easy mutagen key
+`normalized=1` are skipped on subsequent runs.
+
+You can disable or adjust normalization with flags or config:
+
+```bash
+# disable entirely
+ytdlp-wrapper --no-normalize "<url>"
+
+# tune behaviour
+ytdlp-wrapper --normalize-workers 4 --normalize-lufs -16 "<url>"
+
+ytdlp-wrapper --normalize-background "<url>"  # return immediately, run in background
+```
+
+This feature is automatically enabled; to opt out set
+`normalize = false` in `~/.config/ytdlp-wrapper/config.ini`.
+
 ### M3U playlists
 
 A `.m3u` file is written alongside each downloaded playlist so Navidrome can detect it automatically. To rebuild M3U files from existing files on disk without re-downloading:
