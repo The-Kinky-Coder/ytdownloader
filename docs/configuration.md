@@ -17,7 +17,8 @@ Created automatically by the installer. You can also create or edit it manually.
 base_dir = /media/music
 
 # SponsorBlock: comma-separated list of categories to remove from downloads.
-# Remove the leading '#' on the line below to enable.
+# Defaults to `sponsor,selfpromo,interaction` when the key is omitted.
+# Remove the leading '#' on the line below to override or disable.
 # sponsorblock_categories = sponsor,selfpromo,interaction
 ```
 
@@ -31,7 +32,7 @@ Supported keys:
 | `base_dir` | Music download directory | `/media/music` |
 | `log_dir` | Log directory | `<base_dir>/.logs` |
 | `download_archive` | yt-dlp archive file | `<log_dir>/download_archive.txt` |
-| `sponsorblock_categories` | Comma-separated SponsorBlock categories to remove | _(disabled)_ |
+| `sponsorblock_categories` | Comma-separated SponsorBlock categories to remove (defaults to sponsor,selfpromo,interaction) | `sponsor,selfpromo,interaction` |
 
 Common SponsorBlock categories: `sponsor`, `selfpromo`, `interaction`, `intro`, `outro`, `preview`, `filler`, `music_offtopic`.
 

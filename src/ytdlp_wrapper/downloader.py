@@ -328,7 +328,7 @@ def build_track_meta(
     """Build a :class:`TrackMeta` from a yt-dlp info dict.
 
     For playlist downloads pass *playlist_title* (the sanitised folder name) so
-    every track shares the same ``album`` value, and set *is_compilation=True*
+    every track shares the same ``album`` value, and set *is_compilation=playlist_compilation*
     so that ``ALBUMARTIST`` and ``COMPILATION`` tags are applied via mutagen
     after the download.  Navidrome requires both of those tags to group tracks
     from a various-artists playlist into a single album entry.
@@ -653,7 +653,7 @@ def retag_all_playlist_dirs(config: Config, logger: logging.Logger) -> None:
 
 
 def build_playlist_jobs(
-    config: Config, info: dict, logger: logging.Logger
+    config: Config, info: dict, logger: logging.Logger, *, playlist_compilation: bool = True
 ) -> list[DownloadJob]:
     cache = metadata_cache_from_config(config)
     if cache.enabled:
@@ -744,7 +744,7 @@ def build_playlist_jobs(
             meta_info,
             playlist_index,
             playlist_title=playlist_title,
-            is_compilation=True,
+            is_compilation=playlist_compilation,
         )
         if meta.title.lower() in {"index", "videoplayback"}:
             logger.warning("Skipping entry with invalid title: %s", entry_url)
@@ -995,7 +995,19 @@ def download_job(
     raise DownloadError(f"Failed to download {job.output_stem} after retries.")
 
 
-def download_url(config: Config, url: str, logger: logging.Logger) -> None:
+def download_url(
+    config: Config,
+    url: str,
+    logger: logging.Logger,
+    *,
+    playlist_compilation: bool = True,
+) -> None:
+    """Download either a playlist or a single track.
+
+    *playlist_compilation* controls whether playlist jobs are built with
+    ``is_compilation=playlist_compilation`` (the default).  The CLI exposes this as
+    ``--no-compilation`` for the inverse behaviour.
+    """
     logger.info("Fetching metadata from YouTube Music...")
     info = run_yt_dlp_json(
         config,
@@ -1007,7 +1019,9 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
     if is_playlist(info):
         raw_url = info.get("webpage_url") or info.get("original_url") or url or None
         playlist_url = clean_playlist_url(raw_url) if raw_url else None
-        jobs = build_playlist_jobs(config, info, logger)
+        jobs = build_playlist_jobs(
+            config, info, logger, playlist_compilation=playlist_compilation
+        )
     else:
         jobs = [build_single_job(config, info)]
 
@@ -1643,7 +1657,10 @@ def _reprocess_playlist(
         logger.info("Temporary download directory: %s", tmp_dir)
 
         # Build jobs pointing at the temp dir instead of the real playlist dir.
-        jobs = _build_reprocess_jobs(reprocess_config, info, tmp_dir, logger)
+        # defaulting playlist_compilation=True for reprocess runs
+        jobs = _build_reprocess_jobs(
+            reprocess_config, info, tmp_dir, logger, playlist_compilation=True
+        )
         if not jobs:
             logger.warning("No jobs built for %s — skipping.", playlist_url)
             return
@@ -1718,7 +1735,7 @@ def _reprocess_playlist(
 
 
 def _build_reprocess_jobs(
-    config: Config, info: dict, tmp_dir: Path, logger: logging.Logger
+    config: Config, info: dict, tmp_dir: Path, logger: logging.Logger, *, playlist_compilation: bool = True
 ) -> list[DownloadJob]:
     """Build DownloadJobs for a reprocess run, redirecting output to tmp_dir."""
     entries = [entry for entry in info.get("entries") or [] if entry]
@@ -1761,7 +1778,7 @@ def _build_reprocess_jobs(
             meta_info,
             playlist_index,
             playlist_title=playlist_title,
-            is_compilation=True,
+            is_compilation=playlist_compilation,
         )
         source_url = (
             meta_info.get("webpage_url") or meta_info.get("original_url") or entry_url

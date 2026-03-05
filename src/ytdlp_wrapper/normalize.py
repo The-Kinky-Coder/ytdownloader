@@ -186,12 +186,18 @@ def normalize_dir(
     workers: int = 2,
     target_lufs: float | None = None,
     logger: logging.Logger | None = None,
+    progress: object | None = None,
     dry_run: bool = False,
 ) -> tuple[int, int]:
     """Recursively normalize files under *root*.
 
     Returns a tuple ``(success_count, failure_count)``.
     If *target_lufs* is provided it overrides the module-level constant.
+
+    *progress* may be a :class:`ProgressReporter`-like object with
+    ``add_task(key, label)`` and ``complete(key)`` methods; if provided it
+    will be used to display per-file progress.  This mirrors the behaviour of
+    :func:`normalize_files`.
     """
     if target_lufs is not None:
         global TARGET_LUFS
@@ -210,22 +216,32 @@ def normalize_dir(
         return (0, 0)
     success = 0
     failed = 0
+    # register progress tasks up front if requested
+    if progress is not None:
+        for p in to_process:
+            progress.add_task(str(p), p.name)
     if workers <= 1:
         for p in to_process:
             result = normalize_file(p)
+            if progress is not None:
+                progress.complete(str(p))
             if result:
                 success += 1
             else:
                 failed += 1
+                initialize.warning("Normalization failed: %s", p)
         return (success, failed)
     # if more than one worker, execute in parallel
     import multiprocessing
     with multiprocessing.Pool(processes=workers) as pool:
-        for _, result in pool.imap_unordered(_normalize_worker, to_process):
+        for p, result in pool.imap_unordered(_normalize_worker, to_process):
+            if progress is not None:
+                progress.complete(str(p))
             if result:
                 success += 1
             else:
                 failed += 1
+                initialize.warning("Normalization failed: %s", p)
     return (success, failed)
 
 
@@ -234,12 +250,18 @@ def normalize_files(
     workers: int = 2,
     target_lufs: float | None = None,
     logger: logging.Logger | None = None,
+    progress: object | None = None,
     dry_run: bool = False,
 ) -> tuple[int, int]:
     """Normalize a given iterable of audio file paths.
 
     Skips paths that already have the normalized tag.  Returns
     ``(success_count, failure_count)``.
+
+    *progress* may be a :class:`ProgressReporter`-like object with
+    ``add_task(key, label)`` and ``complete(key)`` methods.  If supplied, it
+    will be used to display a per-file progress bar during the normalization
+    run (similar to how download progress is reported).
     """
     if target_lufs is not None:
         global TARGET_LUFS
@@ -255,21 +277,31 @@ def normalize_files(
         return (0, 0)
     success = 0
     failed = 0
+    # register progress tasks if requested
+    if progress is not None:
+        for p in to_process:
+            progress.add_task(str(p), p.name)
     if workers <= 1:
         for p in to_process:
             result = normalize_file(p)
+            if progress is not None:
+                progress.complete(str(p))
             if result:
                 success += 1
             else:
                 failed += 1
+                initialize.warning("Normalization failed: %s", p)
         return (success, failed)
     import multiprocessing
     with multiprocessing.Pool(processes=workers) as pool:
-        for _, result in pool.imap_unordered(_normalize_worker, to_process):
+        for p, result in pool.imap_unordered(_normalize_worker, to_process):
+            if progress is not None:
+                progress.complete(str(p))
             if result:
                 success += 1
             else:
                 failed += 1
+                initialize.warning("Normalization failed: %s", p)
     return (success, failed)
 
 

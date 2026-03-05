@@ -52,7 +52,9 @@ Minimal `config.ini`:
 [ytdlp-wrapper]
 base_dir = /media/music
 
-# Uncomment to enable SponsorBlock trimming:
+# SponsorBlock trimming is **enabled by default** using the most
+# common categories.  You only need to uncomment/modify the line below if you
+# want to change or disable the defaults:
 # sponsorblock_categories = sponsor,selfpromo,interaction
 ```
 
@@ -69,6 +71,11 @@ ytdlp-wrapper "https://music.youtube.com/playlist?list=..."
 # or use --url to avoid shell quoting issues with & characters:
 ytdlp-wrapper --url https://music.youtube.com/playlist?list=...
 ```
+
+By default playlists are treated as Various Artists compilations so Navidrome groups
+all tracks under a single album.  If you happen to be downloading a normal
+single-artist album from a playlist, pass `--no-compilation` to disable that
+tagging behaviour for the current run (the default is preserved for later).
 
 If no URL is provided you will be prompted for one interactively.
 

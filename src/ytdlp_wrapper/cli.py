@@ -162,6 +162,15 @@ def build_parser() -> argparse.ArgumentParser:
             "system was introduced."
         ),
     )
+    parser.add_argument(
+        "--no-compilation",
+        action="store_true",
+        help=(
+            "Assume the playlist being downloaded is **not** a Various Artists compilation. "
+            "By default all playlists are tagged as compilations for Navidrome. "
+            "Use this when downloading a single-artist album from a playlist."
+        ),
+    )
     return parser
 
 
@@ -228,8 +237,15 @@ def main(argv: list[str] | None = None) -> int:
     # SponsorBlock categories: CLI not exposed, so config file only.
     # Value is a comma-separated string like "sponsor,selfpromo,interaction".
     # Empty/absent = SponsorBlock disabled.
-    _sb_raw = user_cfg.get("sponsorblock_categories", "")
-    sponsorblock_categories = tuple(c.strip() for c in _sb_raw.split(",") if c.strip())
+    # Special-case missing key: use the built-in default categories.  An
+    # empty string still yields an empty tuple (disabled) so users can explicitly
+    # disable SponsorBlock by setting ``sponsorblock_categories =`` in their
+    # config file.
+    _sb_raw = user_cfg.get("sponsorblock_categories")
+    if _sb_raw is None:
+        sponsorblock_categories = Config().sponsorblock_categories
+    else:
+        sponsorblock_categories = tuple(c.strip() for c in _sb_raw.split(",") if c.strip())
 
     config = Config().with_overrides(
         base_dir=base_dir,
@@ -327,7 +343,9 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "retry_sponsorblock", False):
             process_pending_sponsorblock(config, logger)
             return 0
-        download_url(config, url, logger)
+        # playlists are treated as compilations by default; allow override
+        playlist_compilation = not getattr(args, "no_compilation", False)
+        download_url(config, url, logger, playlist_compilation=playlist_compilation)
     except DownloadError as exc:
         logger.error("Error: %s", exc)
         return 1

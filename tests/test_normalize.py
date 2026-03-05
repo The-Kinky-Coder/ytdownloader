@@ -85,6 +85,30 @@ class TestNormalizeCalls(unittest.TestCase):
         self.assertEqual(failed, 0)
         self.assertEqual(called, [Path("a.mp3")])
 
+    def test_progress_reporting(self):
+        # two files, both succeed; progress object should see add/complete calls
+        files = [Path("one.mp3"), Path("two.mp3")]
+        normalize.normalize_file = lambda p: True
+        # dummy progress that records calls
+        calls: list = []
+        class DummyProg:
+            def add_task(self, key, label):
+                calls.append(("add", key, label))
+            def complete(self, key):
+                calls.append(("complete", key))
+        prog = DummyProg()
+        success, failed = normalize.normalize_files(
+            files, workers=1, logger=None, progress=prog
+        )
+        self.assertEqual((success, failed), (2, 0))
+        expected = [
+            ("add", "one.mp3", "one.mp3"),
+            ("add", "two.mp3", "two.mp3"),
+            ("complete", "one.mp3"),
+            ("complete", "two.mp3"),
+        ]
+        self.assertEqual(calls, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

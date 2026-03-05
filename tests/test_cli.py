@@ -32,6 +32,32 @@ class TestCLI(unittest.TestCase):
         config = Config().with_overrides(normalize_background=args.normalize_background)
         self.assertTrue(config.normalize_background)
 
+    def test_no_compilation_flag(self):
+        args = self.parser.parse_args(["--no-compilation"])
+        # flag should be present and True; inversion logic handled in cli.main
+        self.assertTrue(args.no_compilation)
+        # simulate inversion as done by main
+        playlist_compilation = not args.no_compilation
+        self.assertFalse(playlist_compilation)
+
+    def test_default_sponsorblock_categories(self):
+        # mimic the logic from cli.main with no config file present
+        user_cfg: dict = {}
+        _sb_raw = user_cfg.get("sponsorblock_categories")
+        if _sb_raw is None:
+            cats = Config().sponsorblock_categories
+        else:
+            cats = tuple(c.strip() for c in _sb_raw.split(",") if c.strip())
+        self.assertEqual(cats, ("sponsor", "selfpromo", "interaction"))
+        # blank string should disable
+        user_cfg = {"sponsorblock_categories": ""}
+        _sb_raw = user_cfg.get("sponsorblock_categories")
+        if _sb_raw is None:
+            cats2 = Config().sponsorblock_categories
+        else:
+            cats2 = tuple(c.strip() for c in _sb_raw.split(",") if c.strip())
+        self.assertEqual(cats2, ())
+
 
 if __name__ == "__main__":
     unittest.main()

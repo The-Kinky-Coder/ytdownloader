@@ -67,7 +67,13 @@ class Config:
     # Tuple of SponsorBlock category strings to remove.
     # Empty tuple = SponsorBlock disabled (no --sponsorblock-remove flag passed).
     # Loaded from config.ini [ytdlp-wrapper] sponsorblock_categories key.
-    sponsorblock_categories: tuple[str, ...] = field(default_factory=tuple)
+    # Tuple of SponsorBlock category strings to remove.
+    # Empty tuple = SponsorBlock disabled.  The hardcoded default mimics the
+    # common categories that most users want; absence of an explicit setting in
+    # config.ini now also yields this default.
+    sponsorblock_categories: tuple[str, ...] = field(
+        default_factory=lambda: ("sponsor", "selfpromo", "interaction")
+    )
 
     def with_overrides(
         self,
