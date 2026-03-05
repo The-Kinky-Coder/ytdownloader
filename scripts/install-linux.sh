@@ -101,9 +101,13 @@ if $INSTALL_PIP_DEPS; then
   echo "Creating venv at: $VENV_PATH"
   python3 -m venv "$VENV_PATH"
   "$VENV_PATH/bin/python" -m pip install --upgrade pip
-  "$VENV_PATH/bin/python" -m pip install rich mutagen
+  # install runtime and development extras (pytest) so tests can be run
+  # from within the venv if the user wants
+  "$VENV_PATH/bin/python" -m pip install rich mutagen pytest
 
   echo "Installing CLI into venv from: $REPO_ROOT"
+  # include the dev extras so `pip install .[dev]` would pull in pytest,
+  # but we already installed it above for the installer.
   "$VENV_PATH/bin/python" -m pip install -e "$REPO_ROOT"
 
   if [[ -n "${SUDO_USER:-}" ]]; then

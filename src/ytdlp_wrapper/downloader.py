@@ -881,7 +881,8 @@ def download_job(
     logger: logging.Logger,
     progress: ProgressReporter,
     sponsorblock_retry_queue: "list[DownloadJob] | None" = None,
-) -> None:
+    downloaded_files: "list[Path] | None" = None,
+) -> Path | None:
     source_url = job.source_url or job.meta.webpage_url
     job.output_dir.mkdir(parents=True, exist_ok=True)
     existing = find_existing_file(job.output_dir, job.output_stem)
@@ -945,8 +946,10 @@ def download_job(
             downloaded_file = find_existing_file(job.output_dir, job.output_stem)
             if downloaded_file and (job.meta.compilation or job.meta.album_artist):
                 apply_compilation_tags(downloaded_file, job.meta, logger)
+            if downloaded_file and downloaded_files is not None:
+                downloaded_files.append(downloaded_file)
             progress.complete(job.key)
-            return
+            return downloaded_file
         # If the only failure was the SponsorBlock API being unreachable, the
         # audio file was still downloaded correctly — yt-dlp just couldn't trim
         # sponsor segments.  Treat this as a soft failure: mark the track as
@@ -961,6 +964,8 @@ def download_job(
             downloaded_file = find_existing_file(job.output_dir, job.output_stem)
             if downloaded_file and (job.meta.compilation or job.meta.album_artist):
                 apply_compilation_tags(downloaded_file, job.meta, logger)
+            if downloaded_file and downloaded_files is not None:
+                downloaded_files.append(downloaded_file)
             # Write a sidecar so the user can re-apply SponsorBlock later via
             # --retry-sponsorblock even if the in-session retry also fails.
             if downloaded_file and config.sponsorblock_categories:
@@ -1010,6 +1015,7 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
     scrub_archive(config, jobs, logger)
     sponsorblock_retry_queue: list[DownloadJob] = []
     download_error: BaseException | None = None
+    downloaded_files: list[Path] = []
     with ProgressReporter(total=len(jobs), logger=logger) as progress:
         with ThreadPoolExecutor(max_workers=config.concurrent_downloads) as executor:
             futures = [
@@ -1020,6 +1026,7 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
                     logger,
                     progress,
                     sponsorblock_retry_queue,
+                    downloaded_files,
                 )
                 for job in jobs
             ]
@@ -1068,6 +1075,27 @@ def download_url(config: Config, url: str, logger: logging.Logger) -> None:
                 "SponsorBlock post-processing retry succeeded for all %d track(s).",
                 len(sponsorblock_retry_queue),
             )
+
+    # --- Normalization step ---
+    if config.normalize and downloaded_files:
+        logger.info("Normalizing %d file(s)…", len(downloaded_files))
+        def _do_norm():
+            from . import normalize
+
+            normalize.normalize_files(
+                downloaded_files,
+                workers=config.normalize_workers,
+                target_lufs=config.normalize_lufs,
+                logger=logger,
+            )
+        if config.normalize_background:
+            from threading import Thread
+
+            t = Thread(target=_do_norm, daemon=True)
+            t.start()
+            logger.info("Normalization running in background")
+        else:
+            _do_norm()
 
     if download_error is not None:
         raise download_error

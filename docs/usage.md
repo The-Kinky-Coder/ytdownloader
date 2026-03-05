@@ -84,6 +84,41 @@ Progress bars are shown during downloads when running in a TTY.
 
 ### Cookies
 
+### Audio normalization
+
+By default, after downloads complete the wrapper will run a two-pass
+EBU‑R128 loudness normalizer on the newly downloaded files using ffmpeg.
+This step uses a small pool of workers (two by default) and is performed
+*after* all downloads finish so the download throughput is unaffected.
+
+Files already tagged as normalized are skipped automatically; the tag is
+an easy mutagen field named `normalized` with value `1` so repeated runs
+are fast. You can disable this behaviour from the command line or config:
+
+```bash
+ytdlp-wrapper --no-normalize "<url>"
+```
+
+or in `~/.config/ytdlp-wrapper/config.ini`:
+
+```ini
+[ytdlp-wrapper]
+normalize = false
+```
+
+Additional normalization options:
+
+```bash
+ytdlp-wrapper --normalize-workers 4 \
+    --normalize-lufs -16 "<url>"
+
+ytdlp-wrapper --normalize-background "<url>"  # return immediately, run in background
+```
+
+The CLI flags mirror configuration file keys; see `load_user_config` for
+more details.
+
+
 ```bash
 ytdlp-wrapper --cookies ~/Downloads/cookies.txt "https://music.youtube.com/watch?v=..."
 ```

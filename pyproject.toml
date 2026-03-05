@@ -11,6 +11,8 @@ dependencies = [
 [project.optional-dependencies]
 ui = ["rich"]
 metadata = ["mutagen"]
+# developer/test dependencies
+dev = ["pytest"]
 
 [project.scripts]
 ytdlp-wrapper = "ytdlp_wrapper.cli:main"

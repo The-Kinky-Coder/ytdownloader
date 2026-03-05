@@ -43,6 +43,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="yt-dlp download archive file",
     )
     parser.add_argument(
+        "--no-normalize",
+        action="store_true",
+        help="Disable automatic audio normalization after download",
+    )
+    parser.add_argument(
+        "--normalize-workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers for normalization (default: 2)",
+    )
+    parser.add_argument(
+        "--normalize-lufs",
+        type=float,
+        default=None,
+        help="Target LUFS level for normalization",
+    )
+    parser.add_argument(
+        "--normalize-background",
+        action="store_true",
+        help="Start normalization in a background thread and exit immediately",
+    )
+    parser.add_argument(
         "--metadata-cache-dir",
         default="~/.cache/ytdownloader/metadata",
         help="Directory for cached yt-dlp metadata",
@@ -223,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
         concurrent_downloads=args.concurrency,
         retries=args.retries,
         audio_format=args.audio_format,
+        normalize=not args.no_normalize,
+        normalize_workers=args.normalize_workers,
+        normalize_lufs=args.normalize_lufs,
+        normalize_background=args.normalize_background,
         sponsorblock_categories=sponsorblock_categories,
     )
     logger = configure_logging(config.log_dir)

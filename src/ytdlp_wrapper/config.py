@@ -25,6 +25,9 @@ def load_user_config(config_path: Path = USER_CONFIG_PATH) -> dict:
         base_dir                 = /media/music
         log_dir                  = /media/music/.logs
         download_archive         = /media/music/.logs/download_archive.txt
+        normalize                = false   # disable automatic normalization
+        normalize_workers        = 2       # worker count for normalization
+        normalize_lufs           = -14.0   # target LUFS level
         sponsorblock_categories  = sponsor,selfpromo,interaction
     """
     if not config_path.exists():
@@ -55,6 +58,12 @@ class Config:
     audio_format: str = "opus"
     yt_dlp_bin: str = "yt-dlp"
     ffmpeg_bin: str = "ffmpeg"
+    # Normalization settings – runs automatically unless disabled with
+    # --no-normalize or normalize=False in the config file.
+    normalize: bool = True
+    normalize_workers: int = 2
+    normalize_lufs: float = -14.0
+    normalize_background: bool = False
     # Tuple of SponsorBlock category strings to remove.
     # Empty tuple = SponsorBlock disabled (no --sponsorblock-remove flag passed).
     # Loaded from config.ini [ytdlp-wrapper] sponsorblock_categories key.
@@ -77,6 +86,10 @@ class Config:
         concurrent_downloads: int | None = None,
         retries: int | None = None,
         audio_format: str | None = None,
+        normalize: bool | None = None,
+        normalize_workers: int | None = None,
+        normalize_lufs: float | None = None,
+        normalize_background: bool | None = None,
         sponsorblock_categories: tuple[str, ...] | None = None,
     ) -> "Config":
         return Config(
@@ -114,6 +127,12 @@ class Config:
             audio_format=audio_format
             if audio_format is not None
             else self.audio_format,
+            normalize=normalize if normalize is not None else self.normalize,
+            normalize_workers=normalize_workers
+            if normalize_workers is not None
+            else self.normalize_workers,
+            normalize_lufs=normalize_lufs if normalize_lufs is not None else self.normalize_lufs,
+            normalize_background=normalize_background if normalize_background is not None else self.normalize_background,
             yt_dlp_bin=self.yt_dlp_bin,
             ffmpeg_bin=self.ffmpeg_bin,
             sponsorblock_categories=sponsorblock_categories
