@@ -135,6 +135,29 @@ Once the API has recovered, apply SponsorBlock to all pending tracks in one go:
 ytdlp-wrapper --retry-sponsorblock
 ```
 
+### Thumbnail recovery
+
+Downloaded tracks normally embed the YouTube/thumb art into the audio file; however not every container supports embedded images and embedding can fail silently. When that happens the wrapper now copies whatever thumbnail file yt-dlp saved (``*.webp``/``.jpg``) to `folder.jpg` beside the audio so Navidrome will always see a cover image.
+
+If an album still ends up without any art, a ``thumbnail`` task is recorded in the
+sidecar file.  You can repair those later without re-downloading:
+
+```bash
+ytdlp-wrapper --retry-thumbnails
+```
+
+Older playlist folders without any cover art can be fixed in bulk using the
+new ``--generate-thumbnails`` command.  It scans the given directory (or, if
+none is supplied, every subdirectory under ``base_dir``) and attempts to
+recreate the same thumbnail that would have been added during a download
+(either by fetching it again from yt-dlp/YouTube or by extracting embedded
+art from the first track).  No audio is downloaded, only image files are
+created.  A progress bar will appear when running in a TTY so you can watch
+the tool work through each playlist folder.
+
+The command will copy any remaining thumbnail files into place and remove the
+pending token when successful.  See `docs/pending-tasks.md` for more details.
+
 This scans your entire music directory for sidecar files, retries SponsorBlock post-processing for each, and removes the sidecar on success. Tracks that still fail are left with their sidecar in place so you can try again later. The command is safe to run multiple times.
 
 > If you had SponsorBlock failures before this sidecar system was introduced, `--retry-sponsorblock` will also scan `errors.log` and `success.log` to bootstrap sidecars for those historic failures automatically.

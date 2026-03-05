@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import unittest
 from pathlib import Path
 import tempfile
+from unittest.mock import MagicMock
+from ytdlp_wrapper.config import Config
 
 from ytdlp_wrapper.pending import (
     PENDING_TASK_SPONSORBLOCK,
@@ -253,6 +256,97 @@ class TestPendingFileRoundtrip(unittest.TestCase):
         )
         found = find_pending_sidecars(self.tmp, task="sponsorblock")
         self.assertEqual(len(found), 1)
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail reprocessing tests
+# ---------------------------------------------------------------------------
+
+class TestProcessPendingThumbnailsIntegration(unittest.TestCase):
+    def _make_config(self, tmp: Path) -> MagicMock:
+        log_dir = tmp / "logs"
+        log_dir.mkdir()
+        cfg = MagicMock()
+        cfg.log_dir = log_dir
+        cfg.base_dir = tmp
+        return cfg
+
+    def test_copy_thumbnail_and_remove_sidecar(self) -> None:
+        from ytdlp_wrapper.downloader import process_pending_thumbnails
+        from ytdlp_wrapper.pending import (
+            PENDING_TASK_THUMBNAIL,
+            find_pending_sidecars,
+            write_pending,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            audio = tmp / "001-Artist-Song.opus"
+            audio.touch()
+            thumb = tmp / "001-Artist-Song.webp"
+            thumb.write_bytes(b"abc")
+            cfg = self._make_config(tmp)
+            logger = MagicMock()
+            # create a pending thumbnail task manually
+            write_pending(audio, "https://example.com/v=1", "001-Artist-Song", [PENDING_TASK_THUMBNAIL], logger=logger)
+            process_pending_thumbnails(cfg, logger)
+            # sidecar removed and folder.jpg created
+            self.assertFalse((tmp / "001-Artist-Song.pending.json").exists())
+            self.assertTrue((tmp / "folder.jpg").exists())
+
+    def test_no_thumbnail_keeps_sidecar(self) -> None:
+        from ytdlp_wrapper.downloader import process_pending_thumbnails
+        from ytdlp_wrapper.pending import (
+            PENDING_TASK_THUMBNAIL,
+            find_pending_sidecars,
+            write_pending,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            audio = tmp / "002-Artist-Song.opus"
+            audio.touch()
+            cfg = self._make_config(tmp)
+            logger = MagicMock()
+            write_pending(audio, "https://example.com/v=1", "002-Artist-Song", [PENDING_TASK_THUMBNAIL], logger=logger)
+            process_pending_thumbnails(cfg, logger)
+            self.assertTrue((tmp / "002-Artist-Song.pending.json").exists())
+            pending = find_pending_sidecars(tmp, task=PENDING_TASK_THUMBNAIL)
+            self.assertEqual(len(pending), 1)
+
+
+
+class TestThumbnailHelper(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmpdir.name)
+        self.logger = logging.getLogger("test")
+        self.logger.addHandler(logging.NullHandler())
+        # minimal config object
+        self.cfg = Config()
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def test_ensure_creates_sidecar_when_no_artwork(self):
+        from ytdlp_wrapper.downloader import _ensure_thumbnail
+        audio = self.base / "foo.opus"
+        audio.touch()
+        _ensure_thumbnail(audio, "url", "foo", self.cfg, self.logger)
+        from ytdlp_wrapper.pending import audio_file_to_sidecar
+        self.assertTrue(audio_file_to_sidecar(audio).exists())
+
+    def test_ensure_copies_thumbnail_file(self):
+        from ytdlp_wrapper.downloader import _ensure_thumbnail
+        audio = self.base / "bar.opus"
+        audio.touch()
+        thumb = self.base / "bar.jpg"
+        thumb.write_bytes(b"xyz")
+        _ensure_thumbnail(audio, "url", "bar", self.cfg, self.logger)
+        self.assertTrue((self.base / "folder.jpg").exists())
+        # sidecar should not be created because thumbnail found
+        from ytdlp_wrapper.pending import audio_file_to_sidecar
+        self.assertFalse(audio_file_to_sidecar(audio).exists())
 
 
 if __name__ == "__main__":

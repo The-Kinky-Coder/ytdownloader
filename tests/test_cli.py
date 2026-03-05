@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch, MagicMock
 
 from ytdlp_wrapper.cli import build_parser
 from ytdlp_wrapper.config import Config
@@ -7,6 +8,10 @@ from ytdlp_wrapper.config import Config
 class TestCLI(unittest.TestCase):
     def setUp(self) -> None:
         self.parser = build_parser()
+        # guard against unexpected prompts – tests should never block on input
+        # and verify the CLI never tries to read from stdin.
+        self._input_patcher = patch("builtins.input", autospec=True)
+        self.input_mock = self._input_patcher.start()
 
     def test_no_normalize_flag(self):
         args = self.parser.parse_args(["--no-normalize"])
@@ -57,6 +62,42 @@ class TestCLI(unittest.TestCase):
         else:
             cats2 = tuple(c.strip() for c in _sb_raw.split(",") if c.strip())
         self.assertEqual(cats2, ())
+
+    def test_retry_thumbnails_flag(self):
+        args = self.parser.parse_args(["--retry-thumbnails"])
+        self.assertTrue(args.retry_thumbnails)
+
+    def test_generate_thumbnails_flag(self):
+        # with directory
+        args = self.parser.parse_args(["--generate-thumbnails", "foo"])
+        self.assertEqual(args.generate_thumbnails, "foo")
+        # without directory
+        args = self.parser.parse_args(["--generate-thumbnails"])
+        self.assertIsNone(args.generate_thumbnails)
+
+    def tearDown(self) -> None:
+        # restore any patched globals from setUp
+        self._input_patcher.stop()
+
+    def test_generate_thumbnails_invokes_function(self):
+        args = ["--generate-thumbnails"]
+        called = []
+        def fake_gen(cfg, logger, directory=None):
+            called.append(directory)
+        from ytdlp_wrapper import downloader
+        # patch the function but restore it afterwards so other tests aren't affected
+        orig = downloader.generate_thumbnails
+        try:
+            downloader.generate_thumbnails = fake_gen
+            self.parser.parse_args(args)
+            # run via main to ensure it actually calls; input stubbed so test won't hang
+            from ytdlp_wrapper.cli import main
+            main(args)
+        finally:
+            downloader.generate_thumbnails = orig
+        self.assertEqual(called, [None])
+        # ensure no prompt was attempted
+        self.input_mock.assert_not_called()
 
 
 if __name__ == "__main__":

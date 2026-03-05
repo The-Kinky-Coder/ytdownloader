@@ -15,6 +15,12 @@ class TestDownloadNormalizationIntegration(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.base = Path(self.tmpdir.name)
 
+        # save originals so tearDown can restore them cleanly
+        self._orig_run_yt_dlp_json = downloader.run_yt_dlp_json
+        self._orig_build_playlist_jobs = downloader.build_playlist_jobs
+        self._orig_download_job = downloader.download_job
+        self._orig_progress_reporter = downloader.ProgressReporter
+
         # patch run_yt_dlp_json to return a playlist
         downloader.run_yt_dlp_json = lambda config, url, logger, extra_args=None: {
             "_type": "playlist",
@@ -53,35 +59,30 @@ class TestDownloadNormalizationIntegration(unittest.TestCase):
         self.norm_called = []
         self._orig_norm = normalize.normalize_files
         def fake_norm(files, workers, target_lufs, logger=None, progress=None):
-            # record progress object too for later assertions
-            print(f"DEBUG fake_norm called, progress={progress!r}")
             self.norm_called.append((tuple(files), workers, target_lufs, progress))
         normalize.normalize_files = fake_norm
-        # intercept progress reporting by replacing ProgressReporter on the
-        # progress module, which is imported inside download_url._do_norm.
-        self.progress_tasks: list = []
+        # stub ProgressReporter on downloader (where it is imported) so the
+        # rich progress bar never runs under pytest.
         class DummyProg:
             def __init__(self, total, logger):
-                print(f"DEBUG DummyProg.__init__ total={total}")
                 self.total = total
             def __enter__(self):
-                print("DEBUG DummyProg.__enter__")
                 return self
             def __exit__(self, exc_type, exc, tb):
-                print("DEBUG DummyProg.__exit__")
                 pass
-            def add_task(self, key, label):
-                print(f"DEBUG DummyProg.add_task {key}")
-                self.progress_tasks.append(("add", key, label))
+            def add_task(self, key, label, total=None):
+                pass
             def complete(self, key):
-                print(f"DEBUG DummyProg.complete {key}")
-                self.progress_tasks.append(("complete", key))
-        import ytdlp_wrapper.progress as _prog
-        _prog.ProgressReporter = DummyProg
+                pass
+        downloader.ProgressReporter = DummyProg
 
     def tearDown(self):
-        # restore normalization function in case tests modified it
+        # restore all monkey-patched module attributes
         normalize.normalize_files = self._orig_norm
+        downloader.run_yt_dlp_json = self._orig_run_yt_dlp_json
+        downloader.build_playlist_jobs = self._orig_build_playlist_jobs
+        downloader.download_job = self._orig_download_job
+        downloader.ProgressReporter = self._orig_progress_reporter
         self.tmpdir.cleanup()
 
     def test_download_url_triggers_normalization(self):

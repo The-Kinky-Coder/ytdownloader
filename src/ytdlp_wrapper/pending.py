@@ -37,6 +37,8 @@ from datetime import datetime
 from pathlib import Path
 
 PENDING_TASK_SPONSORBLOCK = "sponsorblock"
+# Sidecar task recorded when embedding or copying a thumbnail fails.
+PENDING_TASK_THUMBNAIL = "thumbnail"
 
 # Sidecar files use this suffix so they are easy to glob and are clearly not
 # audio files (Navidrome and similar media servers ignore them).

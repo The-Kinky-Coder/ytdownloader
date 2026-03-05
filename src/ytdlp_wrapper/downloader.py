@@ -22,6 +22,7 @@ from .config import Config
 from .metadata_cache import metadata_cache_from_config
 from .pending import (
     PENDING_TASK_SPONSORBLOCK,
+    PENDING_TASK_THUMBNAIL,
     PendingFile,
     find_pending_sidecars,
     write_pending,
@@ -48,6 +49,58 @@ _SPONSORBLOCK_RETRY_ATTEMPTS = 3
 # Query parameters that carry functional meaning and should be kept.
 # Everything else (si, feature, pp, utm_*, etc.) is tracking noise.
 _KEEP_QUERY_PARAMS = {"list", "v"}
+
+
+def _ensure_thumbnail(
+    audio_path: Path,
+    source_url: str,
+    stem: str,
+    config: Config,
+    logger: logging.Logger,
+) -> None:
+    """Guarantee a thumbnail is available for *audio_path*.
+
+    1. If the file already contains embedded artwork (checked via Mutagen),
+       do nothing.
+    2. Otherwise look for a companion thumbnail file in the same directory
+       (``.webp``, ``.jpg``, ``.jpeg``, ``.png``) and copy it to
+       ``folder.jpg``.  Navidrome and other servers will happily use that.
+    3. If neither step succeeds, write a pending sidecar with
+       :data:`PENDING_TASK_THUMBNAIL` so the user can run
+       ``--retry-thumbnails`` later.
+    """
+    try:
+        from mutagen import File as MutagenFile  # type: ignore
+    except Exception:  # pragma: no cover - optional
+        MutagenFile = None  # type: ignore
+    if MutagenFile is not None:
+        try:
+            audio = MutagenFile(audio_path)
+            if audio and audio.tags:
+                # common picture tag keys include APIC (ID3) and covr (MP4)
+                for key in audio.tags.keys():
+                    if any(tok in key.lower() for tok in ("apic", "covr", "picture")):
+                        return
+        except Exception:
+            # ignore any tag-reading error, fall through to file-based logic
+            pass
+    # try to copy thumbnail file
+    thumb = None
+    for ext in (".webp", ".jpg", ".jpeg", ".png"):
+        cand = audio_path.with_suffix(ext)
+        if cand.exists():
+            thumb = cand
+            break
+    if thumb:
+        try:
+            dest = audio_path.parent / "folder.jpg"
+            shutil.copy2(thumb, dest)
+            logger.info("Copied thumbnail for %s -> %s", stem, dest.name)
+            return
+        except Exception as exc:  # pragma: no cover - rare
+            logger.warning("Failed to copy thumbnail for %s: %s", stem, exc)
+    # no artwork found or copy failed; record pending task
+    write_pending(audio_path, source_url, stem, [PENDING_TASK_THUMBNAIL], logger=logger)
 
 
 def clean_playlist_url(url: str) -> str:
@@ -948,6 +1001,11 @@ def download_job(
                 apply_compilation_tags(downloaded_file, job.meta, logger)
             if downloaded_file and downloaded_files is not None:
                 downloaded_files.append(downloaded_file)
+            # ensure we have a filesystem thumbnail or record a pending task
+            if downloaded_file:
+                _ensure_thumbnail(
+                    downloaded_file, source_url, job.output_stem, config, logger
+                )
             progress.complete(job.key)
             return downloaded_file
         # If the only failure was the SponsorBlock API being unreachable, the
@@ -966,6 +1024,11 @@ def download_job(
                 apply_compilation_tags(downloaded_file, job.meta, logger)
             if downloaded_file and downloaded_files is not None:
                 downloaded_files.append(downloaded_file)
+            # ensure thumbnail stored
+            if downloaded_file:
+                _ensure_thumbnail(
+                    downloaded_file, source_url, job.output_stem, config, logger
+                )
             # Write a sidecar so the user can re-apply SponsorBlock later via
             # --retry-sponsorblock even if the in-session retry also fails.
             if downloaded_file and config.sponsorblock_categories:
@@ -1358,6 +1421,108 @@ def process_pending_sponsorblock(config: Config, logger: logging.Logger) -> None
         logger.info("No pending SponsorBlock tasks found under %s.", config.base_dir)
         return
 
+    # At least one pending sidecar exists; process each.
+    logger.info("Found %d file(s) with pending SponsorBlock post-processing.", len(pending))
+
+    succeeded: list[str] = []
+    failed: list[str] = []
+
+    for pf in pending:
+        if not pf.source_url:
+            logger.warning("Skipping %s — sidecar has no source_url.", pf.output_stem)
+            failed.append(pf.output_stem)
+            continue
+        if not pf.audio_file.exists():
+            logger.warning(
+                "Skipping %s — audio file no longer exists at %s.",
+                pf.output_stem,
+                pf.audio_file,
+            )
+            failed.append(pf.output_stem)
+            continue
+
+        logger.info("Retrying SponsorBlock for: %s", pf.output_stem)
+
+        # Build a minimal DownloadJob so we can reuse _retry_sponsorblock_for_job.
+        minimal_meta = TrackMeta(
+            title=pf.output_stem,
+            artist="",
+            album=None,
+            album_artist=None,
+            compilation=False,
+            track_number=None,
+            playlist_index=None,
+            webpage_url=pf.source_url,
+        )
+        job = DownloadJob(
+            key=pf.output_stem,
+            output_dir=pf.audio_file.parent,
+            output_stem=pf.output_stem,
+            meta=minimal_meta,
+            source_url=pf.source_url,
+        )
+
+        success = _retry_sponsorblock_for_job(config, job, logger, pending_file=pf)
+        if success:
+            succeeded.append(pf.output_stem)
+        else:
+            failed.append(pf.output_stem)
+            append_log_line(
+                config,
+                "errors.log",
+                f"{pf.output_stem} | SponsorBlock retry failed — sidecar kept for next attempt",
+            )
+
+    logger.info(
+        "--retry-sponsorblock complete: %d succeeded, %d failed.",
+        len(succeeded),
+        len(failed),
+    )
+
+
+def process_pending_thumbnails(config: Config, logger: logging.Logger) -> None:
+    """Retry filesystem thumbnail work for pending sidecars.
+
+    This handles the ``--retry-thumbnails`` command.  It scans for sidecars
+    containing the ``thumbnail`` token and attempts to satisfy them by copying
+    any companion thumbnail file (e.g. ``.webp``) to ``folder.jpg``.  On
+    success the task is removed; if no thumbnail is found the sidecar is left
+    in place and a warning is logged.
+    """
+    # Clean up any temp artifacts from interrupted runs.
+    _cleanup_temp_sidecars(config.base_dir, logger)
+
+    pending = find_pending_sidecars(
+        config.base_dir, task=PENDING_TASK_THUMBNAIL, logger=logger
+    )
+
+    if not pending:
+        logger.info("No pending thumbnail tasks found under %s.", config.base_dir)
+        return
+
+    for pf in pending:
+        audio = pf.audio_file
+        stem = pf.output_stem
+        success = False
+        # look for a thumbnail file next to the audio
+        for ext in (".webp", ".jpg", ".jpeg", ".png"):
+            thumb = audio.with_suffix(ext)
+            if thumb.exists():
+                try:
+                    dest = audio.parent / "folder.jpg"
+                    shutil.copy2(thumb, dest)
+                    logger.info("Copied thumbnail for %s", audio.name)
+                    success = True
+                except Exception as exc:
+                    logger.warning(
+                        "Failed copying thumbnail for %s: %s", audio.name, exc
+                    )
+                break
+        if success:
+            pf.remove_task(PENDING_TASK_THUMBNAIL)
+        else:
+            logger.warning("No thumbnail found for %s; task remains pending", audio.name)
+
     logger.info(
         "Found %d file(s) with pending SponsorBlock post-processing.", len(pending)
     )
@@ -1433,6 +1598,141 @@ def read_playlist_url_from_m3u(m3u_path: Path) -> str | None:
         if stripped.startswith(_M3U_PLAYLIST_URL_PREFIX):
             url = stripped[len(_M3U_PLAYLIST_URL_PREFIX) :].strip()
             return url if url else None
+
+
+def _download_thumbnail(url: str, dest: Path) -> bool:
+    """Fetch *url* and write it to *dest*. Return True on success."""
+    try:
+        import urllib.request
+
+        # simple download, overwrite if present
+        urllib.request.urlretrieve(url, str(dest))
+        return True
+    except Exception:
+        return False
+
+
+def _extract_embedded_art(audio: Path, dest: Path) -> bool:
+    """Extract embedded artwork from *audio* to *dest*.
+
+    Returns True if art was written, False otherwise.  Uses mutagen's API.
+    """
+    try:
+        from mutagen import File as MutagenFile  # type: ignore
+    except Exception:  # pragma: no cover
+        return False
+    try:
+        audiofile = MutagenFile(audio)
+    except Exception:
+        return False
+    if not audiofile or not getattr(audiofile, "tags", None):
+        return False
+    # ID3 pictures
+    pics = []
+    if hasattr(audiofile.tags, "getall"):
+        for key in audiofile.tags.keys():
+            if key.startswith("APIC"):
+                pics.append(audiofile.tags.getall(key))
+    # mp4/covr
+    if hasattr(audiofile, "pictures") and audiofile.pictures:
+        pics.extend(audiofile.pictures)
+    if not pics:
+        return False
+    # take first picture data
+    data = None
+    first = pics[0]
+    if isinstance(first, list) or isinstance(first, tuple):
+        first = first[0]
+    if hasattr(first, "data"):
+        data = first.data
+    elif isinstance(first, bytes):
+        data = first
+    if data:
+        try:
+            with open(dest, "wb") as f:
+                f.write(data)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def generate_playlist_thumbnail(
+    playlist_dir: Path, config: Config, logger: logging.Logger
+) -> None:
+    """Ensure a thumbnail exists for *playlist_dir*.
+
+    1. If ``folder.jpg`` already exists, do nothing.
+    2. If the M3U has a playlist URL, try fetching metadata and downloading
+       the thumbnail from the first entry (or playlist itself).
+    3. If that fails, look for embedded art in the first audio file and
+       extract it.
+    4. If all else fails, write a pending thumbnail task so it can be retried
+       later via ``--retry-thumbnails``.
+    """
+    out = playlist_dir / "folder.jpg"
+    if out.exists():
+        logger.debug("Thumbnail already exists in %s", playlist_dir.name)
+        return
+    # attempt using stored playlist URL
+    m3u = playlist_dir / f"{playlist_dir.name}.m3u"
+    url = read_playlist_url_from_m3u(m3u)
+    thumb_url: str | None = None
+    if url:
+        try:
+            info = run_yt_dlp_json(config, url, logger=logger)
+            # try playlist thumbnail
+            thumb_url = info.get("thumbnails") or info.get("thumbnail")
+            if isinstance(thumb_url, list) and thumb_url:
+                thumb_url = thumb_url[-1].get("url") if isinstance(thumb_url[-1], dict) else thumb_url[-1]
+            if not thumb_url and info.get("entries"):
+                first = info.get("entries")[0] or {}
+                thumb_url = first.get("thumbnails") or first.get("thumbnail")
+                if isinstance(thumb_url, list) and thumb_url:
+                    thumb_url = thumb_url[-1].get("url") if isinstance(thumb_url[-1], dict) else thumb_url[-1]
+        except Exception:
+            logger.debug("Failed to fetch metadata for %s", playlist_dir.name)
+    if thumb_url:
+        if _download_thumbnail(str(thumb_url), out):
+            logger.info("Downloaded thumbnail for %s", playlist_dir.name)
+            return
+        else:
+            logger.warning("Could not download thumbnail URL for %s", playlist_dir.name)
+    # try extract from first audio file
+    audio_files = sorted(
+        p for p in playlist_dir.iterdir() if p.suffix.lower() in _AUDIO_EXTS
+    )
+    if audio_files:
+        if _extract_embedded_art(audio_files[0], out):
+            logger.info("Extracted embedded artwork for %s", playlist_dir.name)
+            return
+    # give up for now
+    # store a pending thumbnail task so --retry-thumbnails can pick it up
+    # use first audio file or playlist_dir/name if none
+    target_audio = audio_files[0] if audio_files else playlist_dir / playlist_dir.name
+    write_pending(target_audio, url or "", playlist_dir.name, [PENDING_TASK_THUMBNAIL], logger=logger)
+
+
+def generate_thumbnails(
+    config: Config, logger: logging.Logger, directory: Path | None = None
+) -> None:
+    """Generate thumbnails for existing playlists.
+
+    *directory* restricts the operation to a single playlist folder; if
+    omitted all subdirectories of *config.base_dir* are processed.
+    """
+    base = Path(directory) if directory else config.base_dir
+    folders = [base] if directory else [p for p in config.base_dir.iterdir() if p.is_dir()]
+
+    # report progress while processing each playlist folder (mirrors the
+    # download/normalization logic).  We use the total number of folders so the
+    # bar advances once per directory processed.
+    with ProgressReporter(total=len(folders), logger=logger) as progress:
+        for folder in folders:
+            key = str(folder)
+            progress.add_task(key, folder.name)
+            generate_playlist_thumbnail(folder, config, logger)
+            progress.complete(key)
     return None
 
 

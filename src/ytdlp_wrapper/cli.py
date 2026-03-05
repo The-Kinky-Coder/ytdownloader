@@ -163,6 +163,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--retry-thumbnails",
+        action="store_true",
+        help=(
+            "Reprocess thumbnail sidecars created when embedding or copying art "
+            "failed during download.  Copies any existing thumbnail to folder.jpg."
+        ),
+    )
+    parser.add_argument(
+        "--generate-thumbnails",
+        nargs="?",
+        metavar="DIRECTORY",
+        help=(
+            "Generate thumbnails for an existing playlist folder. "
+            "If no DIRECTORY is given, all subdirectories under the base_dir are processed."
+        ),
+    )
+    parser.add_argument(
         "--no-compilation",
         action="store_true",
         help=(
@@ -208,6 +225,8 @@ def main(argv: list[str] | None = None) -> int:
         or getattr(args, "reprocess_playlists", False)
         or getattr(args, "stamp_missing_urls", False)
         or getattr(args, "retry_sponsorblock", False)
+        or getattr(args, "retry_thumbnails", False)
+        or (getattr(args, "generate_thumbnails", False) is not False)
     )
     if _offline_mode:
         url = ""
@@ -278,6 +297,29 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("SponsorBlock disabled (no categories set in config.ini)")
 
     try:
+        # Handle actions that do not need yt-dlp/ffmpeg before checking
+        # dependencies.  Previously these were processed after ensure_dependencies,
+        # which caused errors when yt-dlp was missing.
+        if getattr(args, "retry_sponsorblock", False):
+            process_pending_sponsorblock(config, logger)
+            return 0
+        if getattr(args, "retry_thumbnails", False):
+            from .downloader import process_pending_thumbnails
+
+            process_pending_thumbnails(config, logger)
+            return 0
+        if getattr(args, "generate_thumbnails", False) is not False:
+            from .downloader import generate_thumbnails
+
+            generate_thumbnails(
+                config,
+                logger,
+                directory=Path(args.generate_thumbnails)
+                if args.generate_thumbnails
+                else None,
+            )
+            return 0
+
         ensure_dependencies(config)
         ensure_log_dirs(config)
         # Cookies resolution order:
@@ -342,6 +384,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if getattr(args, "retry_sponsorblock", False):
             process_pending_sponsorblock(config, logger)
+            return 0
+        if getattr(args, "retry_thumbnails", False):
+            from .downloader import process_pending_thumbnails
+
+            process_pending_thumbnails(config, logger)
+            return 0
+        if getattr(args, "generate_thumbnails", False) is not False:
+            from .downloader import generate_thumbnails
+
+            generate_thumbnails(config, logger, directory=Path(args.generate_thumbnails) if args.generate_thumbnails else None)
             return 0
         # playlists are treated as compilations by default; allow override
         playlist_compilation = not getattr(args, "no_compilation", False)

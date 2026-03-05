@@ -147,11 +147,24 @@ On a later run, once the API is reachable again, you can replay all pending Spon
 ytdlp-wrapper --retry-sponsorblock
 ```
 
-This will:
+### Generate thumbnails
 
-- Bootstrap sidecars from `errors.log` for any pre-sidecar failures (one-time, idempotent).
-- Scan `base_dir` recursively for `*.pending.json` files with a `sponsorblock` task.
-- Re-run SponsorBlock segment removal on each matched audio file.
-- Delete the sidecar once the task succeeds.
+If you have existing playlist folders that were downloaded before the cover art
+copying logic existed, you can create `folder.jpg` files automatically.  The
+command inspects each playlist directory (or a single one you specify) and
+attempts to download or extract a thumbnail exactly the same way the normal
+download path does:
 
-`--retry-sponsorblock` does not require a URL and does not download anything.
+```bash
+ytdlp-wrapper --generate-thumbnails
+# or restrict to one playlist
+ ytdlp-wrapper --generate-thumbnails "/media/music/My Playlist"
+```
+
+It is essentially a read‑only pass: no audio is downloaded and the only
+filesystem changes are adding a `folder.jpg` image (or writing a pending
+thumbnail sidecar if the attempt fails).  A progress bar is shown when
+running in a terminal so you can watch it iterate through each playlist
+folder.  This is handy when you’ve been running the tool for a long time and
+want to backfill cover files for old folders.
+
