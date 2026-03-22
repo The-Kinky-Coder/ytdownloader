@@ -1156,7 +1156,7 @@ def download_url(
     # --- Normalization step ---
     if config.normalize and downloaded_files:
         logger.info("Normalizing %d file(s)…", len(downloaded_files))
-        def _do_norm():
+        def _do_norm(progress=None):
             from . import normalize
 
             normalize.normalize_files(
@@ -1164,6 +1164,7 @@ def download_url(
                 workers=config.normalize_workers,
                 target_lufs=config.normalize_lufs,
                 logger=logger,
+                progress=progress,
             )
         if config.normalize_background:
             from threading import Thread
@@ -1172,7 +1173,12 @@ def download_url(
             t.start()
             logger.info("Normalization running in background")
         else:
-            _do_norm()
+            with ProgressReporter(
+                total=len(downloaded_files),
+                logger=logger,
+                label="Normalizing",
+            ) as norm_progress:
+                _do_norm(progress=norm_progress)
 
     if download_error is not None:
         raise download_error

@@ -1,0 +1,11 @@
+feat: add progress bar for normalization stage and improve progress reporting
+
+- Add a label parameter to ProgressReporter to allow customizing the progress bar label (default: "Downloading").
+- Update the Rich progress bar to display the provided label, making it reusable for other stages.
+- In the normalization step of download_url (downloader.py), wrap the normalization process in a ProgressReporter context with label="Normalizing", so users see a progress bar during normalization, just like during downloads.
+- Pass the progress reporter to normalize_files for per-track progress updates.
+- The normalization progress bar now shows the number of tracks normalized and prints each completed track above the bar, improving user feedback and transparency.
+- Minor: Set default for --generate-thumbnails to False in the CLI parser for consistency.
+
+User impact:
+Users now see a clear progress bar and per-track updates during the normalization stage, making the process more user-friendly and informative, especially for large playlists.

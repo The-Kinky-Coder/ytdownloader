@@ -39,9 +39,10 @@ class ProgressReporter:
     original handler is restored on exit.
     """
 
-    def __init__(self, total: int, logger: logging.Logger) -> None:
+    def __init__(self, total: int, logger: logging.Logger, label: str = "Downloading") -> None:
         self._logger = logger
         self._total = total
+        self._label = label
         self._completed = 0
         self._tasks: dict[str, DownloadTask] = {}
         self._use_rich = _RICH_AVAILABLE
@@ -68,7 +69,7 @@ class ProgressReporter:
             self.console = Console()
             self._progress = Progress(
                 SpinnerColumn(),
-                TextColumn("[bold blue]Downloading"),
+                TextColumn(f"[bold blue]{label}"),
                 BarColumn(bar_width=40),
                 MofNCompleteColumn(),
                 TextColumn("tracks"),

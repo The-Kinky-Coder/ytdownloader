@@ -173,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--generate-thumbnails",
         nargs="?",
+        default=False,
         metavar="DIRECTORY",
         help=(
             "Generate thumbnails for an existing playlist folder. "
